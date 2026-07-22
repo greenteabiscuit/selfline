@@ -3,6 +3,7 @@ import SwiftUI
 
 enum NoteBodyBlock: Equatable {
     case prose(String)
+    case quote(String)
     case code(language: String?, text: String)
 }
 
@@ -31,23 +32,34 @@ enum NoteBodyMarkupParser {
         }
 
         while lineIndex < lines.count {
-            guard let opening = openingFence(in: lines[lineIndex]),
-                  let closingIndex = lines[(lineIndex + 1)...].firstIndex(
-                    where: isClosingFence
-                  ) else {
-                proseLines.append(lines[lineIndex])
-                lineIndex += 1
+            if let opening = openingFence(in: lines[lineIndex]),
+               let closingIndex = lines[(lineIndex + 1)...].firstIndex(
+                where: isClosingFence
+               ) {
+                appendProse()
+                blocks.append(
+                    .code(
+                        language: opening.language,
+                        text: lines[(lineIndex + 1)..<closingIndex].joined(separator: "\n")
+                    )
+                )
+                lineIndex = closingIndex + 1
                 continue
             }
 
-            appendProse()
-            blocks.append(
-                .code(
-                    language: opening.language,
-                    text: lines[(lineIndex + 1)..<closingIndex].joined(separator: "\n")
-                )
-            )
-            lineIndex = closingIndex + 1
+            if quoteContent(in: lines[lineIndex]) != nil {
+                appendProse()
+                var quoteLines: [String] = []
+                while lineIndex < lines.count,
+                      let quote = quoteContent(in: lines[lineIndex]) {
+                    quoteLines.append(quote)
+                    lineIndex += 1
+                }
+                blocks.append(.quote(quoteLines.joined(separator: "\n")))
+            } else {
+                proseLines.append(lines[lineIndex])
+                lineIndex += 1
+            }
         }
 
         appendProse()
@@ -97,6 +109,19 @@ enum NoteBodyMarkupParser {
 
     private static func isClosingFence(_ line: String) -> Bool {
         line.trimmingCharacters(in: .whitespaces) == "```"
+    }
+
+    private static func quoteContent(in line: String) -> String? {
+        guard let marker = line.firstIndex(where: { !$0.isWhitespace }),
+              line[marker] == ">" else {
+            return nil
+        }
+        var contentStart = line.index(after: marker)
+        if contentStart < line.endIndex,
+           line[contentStart] == " " || line[contentStart] == "\t" {
+            contentStart = line.index(after: contentStart)
+        }
+        return String(line[contentStart...])
     }
 
     private static func nextSingleBacktick(in text: String, from start: String.Index) -> String.Index? {
@@ -189,6 +214,8 @@ struct LinkedNoteBodyText: View {
                 case let .prose(prose):
                     Text(NoteBodyLinkFormatter.attributedString(for: prose))
                         .textSelection(.enabled)
+                case let .quote(quote):
+                    NoteQuoteBlock(text: quote)
                 case let .code(language, code):
                     NoteCodeBlock(text: code, language: language)
                 }
@@ -200,11 +227,43 @@ struct LinkedNoteBodyText: View {
         .accessibilityValue(text)
         .accessibilityHint(
             blocks.contains { block in
-                guard case let .prose(prose) = block else { return false }
-                return NoteBodyLinkFormatter.attributedString(for: prose).runs.contains {
+                let linkableText: String
+                switch block {
+                case let .prose(prose), let .quote(prose):
+                    linkableText = prose
+                case .code:
+                    return false
+                }
+                return NoteBodyLinkFormatter.attributedString(for: linkableText).runs.contains {
                     $0.link != nil
                 }
             }
+                ? "HTTP and HTTPS links open in the default browser."
+                : ""
+        )
+    }
+}
+
+private struct NoteQuoteBlock: View {
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(width: 3)
+                .accessibilityHidden(true)
+            Text(NoteBodyLinkFormatter.attributedString(for: text.isEmpty ? " " : text))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Quote block")
+        .accessibilityValue(text)
+        .accessibilityHint(
+            NoteBodyLinkFormatter.attributedString(for: text).runs.contains { $0.link != nil }
                 ? "HTTP and HTTPS links open in the default browser."
                 : ""
         )

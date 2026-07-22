@@ -85,6 +85,20 @@ final class LinkPreviewTests: XCTestCase {
         )
     }
 
+    func testNoteBodyMarkupGroupsQuoteLinesAndLeavesQuotesInsideCodeLiteral() {
+        let body = "Before\n> First `value`\n  > https://example.com\nAfter\n```\n> literal code\n```"
+
+        XCTAssertEqual(
+            NoteBodyMarkupParser.blocks(in: body),
+            [
+                .prose("Before"),
+                .quote("First `value`\nhttps://example.com"),
+                .prose("After"),
+                .code(language: nil, text: "> literal code")
+            ]
+        )
+    }
+
     func testComposerCodeSyntaxFindsInlineAndFencedRegions() {
         let body = "Use `value` here\n```swift\nlet value = `literal`\n```\nDone"
         let source = body as NSString
@@ -128,17 +142,95 @@ final class LinkPreviewTests: XCTestCase {
         )
     }
 
-    @MainActor
-    func testComposerCodeHighlighterAppliesLiveBlockAndInlineStyles() throws {
-        let textView = NSTextView()
-        textView.string = "Use `value`\n```\nlet value = 1"
+    func testComposerQuoteSyntaxGroupsLinesAndExcludesFencedCode() {
+        let body = "> First\n  > Second\nPlain\n```\n> literal code\n```"
+        let source = body as NSString
+        let fencedRanges = ComposerCodeSyntaxParser.regions(in: body).compactMap { region in
+            guard case .fenced = region.kind else { return nil }
+            return region.range
+        }
 
-        ComposerCodeHighlighter.apply(to: textView)
+        XCTAssertEqual(
+            ComposerQuoteSyntaxParser.regions(in: body, excluding: fencedRanges),
+            [
+                ComposerQuoteRegion(
+                    range: source.range(of: "> First\n  > Second"),
+                    markerRanges: [
+                        source.range(of: "> "),
+                        source.range(of: "  > ")
+                    ]
+                )
+            ]
+        )
+    }
+
+    func testComposerPasteRestoresStandardSlackEmojiFromHTML() {
+        let html = """
+        <span>Done <img alt=":white_check_mark:" data-stringify-emoji=":white_check_mark:" src="https://a.slack-edge.com/production-standard-emoji-assets/16.0/apple-medium/2705@2x.png"> <img data-stringify-emoji=":woman_technologist:" src="https://a.slack-edge.com/production-standard-emoji-assets/16.0/apple-medium/1f469-200d-1f4bb@2x.png"></span>
+        """
+
+        XCTAssertEqual(
+            ComposerPasteboardText.emojiPreservingString(
+                plainText: "Done :white_check_mark: :woman_technologist:",
+                html: html
+            ),
+            "Done ✅ 👩‍💻"
+        )
+    }
+
+    func testComposerPasteLeavesLiteralAndCustomShortcodesUnchanged() {
+        XCTAssertEqual(
+            ComposerPasteboardText.emojiPreservingString(
+                plainText: ":white_check_mark:",
+                html: "<span>:white_check_mark:</span>"
+            ),
+            ":white_check_mark:"
+        )
+        XCTAssertEqual(
+            ComposerPasteboardText.emojiPreservingString(
+                plainText: ":custom_party:",
+                html: "<img data-stringify-emoji=\":custom_party:\" src=\"https://emoji.slack-edge.com/custom.png\">"
+            ),
+            ":custom_party:"
+        )
+    }
+
+    func testComposerPasteContinuesQuoteAcrossIndentedAndBlankLines() {
+        XCTAssertEqual(
+            ComposerPasteboardText.continuingQuoteString(
+                for: "First line\n    indented detail\n\nLast line"
+            ),
+            "First line\n>     indented detail\n> \n> Last line"
+        )
+        XCTAssertEqual(
+            ComposerPasteboardText.continuingQuoteString(
+                for: "First line\n> Already quoted"
+            ),
+            "First line\n> Already quoted"
+        )
+    }
+
+    @MainActor
+    func testComposerMarkupHighlighterAppliesLiveQuoteBlockAndCodeStyles() throws {
+        let textView = NSTextView()
+        textView.string = "> Quoted text\nUse `value`\n```\nlet value = 1"
+
+        ComposerMarkupHighlighter.apply(to: textView)
 
         let source = textView.string as NSString
+        let quoteLocation = source.range(of: "Quoted text").location
+        let quoteMarkerLocation = source.range(of: "> ").location
         let inlineLocation = source.range(of: "`value`").location
         let blockLocation = source.range(of: "```\nlet value = 1").location
         let markerLocation = source.range(of: "```").location
+        let quoteAttributes = try XCTUnwrap(textView.textStorage?.attributes(
+            at: quoteLocation,
+            effectiveRange: nil
+        ))
+        let quoteMarkerAttributes = try XCTUnwrap(textView.textStorage?.attributes(
+            at: quoteMarkerLocation,
+            effectiveRange: nil
+        ))
         let inlineAttributes = try XCTUnwrap(textView.textStorage?.attributes(
             at: inlineLocation,
             effectiveRange: nil
@@ -152,6 +244,11 @@ final class LinkPreviewTests: XCTestCase {
             effectiveRange: nil
         ))
 
+        XCTAssertEqual(
+            (quoteAttributes[.paragraphStyle] as? NSParagraphStyle)?.headIndent,
+            14
+        )
+        XCTAssertEqual(quoteMarkerAttributes[.foregroundColor] as? NSColor, .clear)
         XCTAssertEqual(inlineAttributes[.foregroundColor] as? NSColor, .systemRed)
         XCTAssertNotNil(blockAttributes[.font] as? NSFont)
         XCTAssertEqual(markerAttributes[.foregroundColor] as? NSColor, .clear)

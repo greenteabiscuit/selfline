@@ -763,7 +763,7 @@ struct ContentView: View {
                     },
                     accessibilityIdentifier: "reply-composer-field",
                     accessibilityLabel: "Write a reply",
-                    accessibilityHelp: "Command Return sends the reply. Return inserts a new line. Single and triple backticks preview code formatting. Pasting a clipboard image adds it to this reply."
+                    accessibilityHelp: "Command Return sends the reply. Return inserts a new line. A greater-than sign at the start of a line previews a quote block. Single and triple backticks preview code formatting. Pasting a clipboard image adds it to this reply."
                 )
                 .frame(minHeight: 48, maxHeight: 110)
 

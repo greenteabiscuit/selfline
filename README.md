@@ -101,6 +101,8 @@ Choose **Help → Keyboard Shortcuts** or press `Command-Shift-?` for the in-app
 
 The Slack-compatible composer behavior is intentional and unchanged: `Command-Return` sends; Return alone inserts a newline.
 
+The composer previews lightweight formatting without changing the stored plain text. Start a line with `>` to create a quote block; multiline text pasted on that line remains in the quote block and preserves its original indentation. Wrap inline code in single backticks and fenced code blocks in triple backticks. Quote and code markers are hidden in the live preview and rendered notes while remaining in the portable source text.
+
 ## Backup and restore
 
 Open **Settings** or the **Archive** menu to create a manual backup. **Settings** also accepts a sandbox security-scoped folder bookmark for automatic backups. An automatic backup is attempted after successful startup at most once every 24 hours. Every backup is first built at a unique hidden partial path, then published without overwriting another item only after full verification.

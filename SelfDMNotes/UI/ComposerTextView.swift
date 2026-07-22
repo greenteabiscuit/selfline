@@ -18,6 +18,11 @@ struct ComposerCodeRegion: Equatable {
     }
 }
 
+struct ComposerQuoteRegion: Equatable {
+    let range: NSRange
+    let markerRanges: [NSRange]
+}
+
 enum ComposerCodeSyntaxParser {
     static func regions(in text: String) -> [ComposerCodeRegion] {
         let source = text as NSString
@@ -111,18 +116,216 @@ enum ComposerCodeSyntaxParser {
     }
 }
 
+enum ComposerQuoteSyntaxParser {
+    static func regions(
+        in text: String,
+        excluding excludedRanges: [NSRange] = []
+    ) -> [ComposerQuoteRegion] {
+        let source = text as NSString
+        var regions: [ComposerQuoteRegion] = []
+        var regionStart: Int?
+        var regionEnd: Int?
+        var markerRanges: [NSRange] = []
+        var position = 0
+
+        func appendRegion() {
+            guard let regionStart, let regionEnd else { return }
+            regions.append(
+                ComposerQuoteRegion(
+                    range: NSRange(location: regionStart, length: regionEnd - regionStart),
+                    markerRanges: markerRanges
+                )
+            )
+        }
+
+        while position < source.length {
+            var lineStart = 0
+            var lineEnd = 0
+            var contentsEnd = 0
+            source.getLineStart(
+                &lineStart,
+                end: &lineEnd,
+                contentsEnd: &contentsEnd,
+                for: NSRange(location: position, length: 0)
+            )
+            let lineRange = NSRange(location: lineStart, length: contentsEnd - lineStart)
+            let isExcluded = excludedRanges.contains {
+                NSIntersectionRange($0, lineRange).length > 0
+            }
+
+            if !isExcluded, let markerRange = quoteMarkerRange(in: source, lineRange: lineRange) {
+                if regionStart == nil {
+                    regionStart = lineStart
+                }
+                regionEnd = contentsEnd
+                markerRanges.append(markerRange)
+            } else {
+                appendRegion()
+                regionStart = nil
+                regionEnd = nil
+                markerRanges.removeAll(keepingCapacity: true)
+            }
+            position = lineEnd
+        }
+
+        appendRegion()
+        return regions
+    }
+
+    private static func quoteMarkerRange(
+        in source: NSString,
+        lineRange: NSRange
+    ) -> NSRange? {
+        let marker = source.rangeOfCharacter(
+            from: CharacterSet.whitespaces.inverted,
+            options: [],
+            range: lineRange
+        )
+        guard marker.location != NSNotFound,
+              source.character(at: marker.location) == 0x3E else {
+            return nil
+        }
+        var markerEnd = marker.location + 1
+        if markerEnd < NSMaxRange(lineRange) {
+            let nextCharacter = source.character(at: markerEnd)
+            if nextCharacter == 0x20 || nextCharacter == 0x09 {
+                markerEnd += 1
+            }
+        }
+        return NSRange(location: lineRange.location, length: markerEnd - lineRange.location)
+    }
+}
+
+enum ComposerPasteboardText {
+    static func emojiPreservingString(plainText: String, html: String) -> String {
+        let fullRange = NSRange(location: 0, length: (html as NSString).length)
+        let replacements = imageExpression.matches(in: html, range: fullRange).compactMap {
+            match -> (shortcode: String, emoji: String)? in
+            let tag = (html as NSString).substring(with: match.range)
+            guard let shortcode = attribute(named: "data-stringify-emoji", in: tag),
+                  let source = attribute(named: "src", in: tag),
+                  let emoji = unicodeEmoji(fromImageSource: source) else {
+                return nil
+            }
+            return (shortcode, emoji)
+        }
+
+        var result = plainText
+        var searchStart = result.startIndex
+        for replacement in replacements {
+            guard let range = result.range(
+                of: replacement.shortcode,
+                range: searchStart..<result.endIndex
+            ) else {
+                continue
+            }
+            let replacementOffset = result.distance(
+                from: result.startIndex,
+                to: range.lowerBound
+            )
+            result.replaceSubrange(range, with: replacement.emoji)
+            searchStart = result.index(
+                result.startIndex,
+                offsetBy: replacementOffset + replacement.emoji.count
+            )
+        }
+        return result
+    }
+
+    static func emojiPreservingString(from pasteboard: NSPasteboard) -> String? {
+        guard let plainText = pasteboard.string(forType: .string),
+              let htmlData = pasteboard.data(forType: .html),
+              let html = String(data: htmlData, encoding: .utf8) else {
+            return nil
+        }
+        let transformed = emojiPreservingString(plainText: plainText, html: html)
+        return transformed == plainText ? nil : transformed
+    }
+
+    static func continuingQuoteString(for text: String) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        var lines = normalized.components(separatedBy: "\n")
+        guard lines.count > 1 else { return normalized }
+        for index in lines.indices.dropFirst() where !hasQuoteMarker(lines[index]) {
+            lines[index] = "> " + lines[index]
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static let imageExpression = try! NSRegularExpression(
+        pattern: #"<img\b[^>]*>"#,
+        options: [.caseInsensitive]
+    )
+
+    private static func hasQuoteMarker(_ line: String) -> Bool {
+        guard let firstContent = line.firstIndex(where: { !$0.isWhitespace }) else {
+            return false
+        }
+        return line[firstContent] == ">"
+    }
+
+    private static func attribute(named name: String, in tag: String) -> String? {
+        let escapedName = NSRegularExpression.escapedPattern(for: name)
+        for quote in ["\"", "'"] {
+            let expression = try! NSRegularExpression(
+                pattern: "\\b\(escapedName)\\s*=\\s*\(quote)(.*?)\(quote)",
+                options: [.caseInsensitive]
+            )
+            let fullRange = NSRange(location: 0, length: (tag as NSString).length)
+            guard let match = expression.firstMatch(in: tag, range: fullRange),
+                  match.numberOfRanges == 2 else {
+                continue
+            }
+            return (tag as NSString).substring(with: match.range(at: 1))
+        }
+        return nil
+    }
+
+    private static func unicodeEmoji(fromImageSource source: String) -> String? {
+        guard let url = URL(string: source),
+              url.host?.lowercased() == "a.slack-edge.com",
+              url.path.contains("emoji-assets"),
+              let filename = url.path.split(separator: "/").last else {
+            return nil
+        }
+        let stem = filename.split(separator: ".", maxSplits: 1).first?
+            .split(separator: "@", maxSplits: 1).first ?? ""
+        let scalars = stem.split(separator: "-").compactMap { component -> UnicodeScalar? in
+            guard let value = UInt32(component, radix: 16) else { return nil }
+            return UnicodeScalar(value)
+        }
+        guard !scalars.isEmpty,
+              scalars.count == stem.split(separator: "-").count else {
+            return nil
+        }
+        return String(String.UnicodeScalarView(scalars))
+    }
+}
+
 @MainActor
-enum ComposerCodeHighlighter {
+enum ComposerMarkupHighlighter {
     static func apply(to textView: NSTextView) {
         guard let textStorage = textView.textStorage else { return }
         let source = textView.string
         let fullRange = NSRange(location: 0, length: textStorage.length)
-        let regions = ComposerCodeSyntaxParser.regions(in: source)
-        (textView as? SendingTextView)?.codeBlockRanges = regions.compactMap { region in
+        let codeRegions = ComposerCodeSyntaxParser.regions(in: source)
+        let fencedCodeRanges = codeRegions.compactMap { region -> NSRange? in
             guard case .fenced = region.kind else { return nil }
             return region.range
         }
+        let quoteRegions = ComposerQuoteSyntaxParser.regions(
+            in: source,
+            excluding: fencedCodeRanges
+        )
+        (textView as? SendingTextView)?.codeBlockRanges = fencedCodeRanges
+        (textView as? SendingTextView)?.quoteBlockRanges = quoteRegions.map(\.range)
         let bodyFont = NSFont.preferredFont(forTextStyle: .body)
+        let quoteParagraphStyle = NSMutableParagraphStyle()
+        quoteParagraphStyle.setParagraphStyle(NSParagraphStyle.default)
+        quoteParagraphStyle.firstLineHeadIndent = 14
+        quoteParagraphStyle.headIndent = 14
         let baseAttributes: [NSAttributedString.Key: Any] = [
             .font: bodyFont,
             .foregroundColor: NSColor.textColor,
@@ -139,7 +342,7 @@ enum ComposerCodeHighlighter {
         if fullRange.length > 0 {
             textStorage.setAttributes(baseAttributes, range: fullRange)
         }
-        for region in regions {
+        for region in codeRegions {
             switch region.kind {
             case .inline:
                 textStorage.addAttributes(
@@ -175,6 +378,22 @@ enum ComposerCodeHighlighter {
                 }
             }
         }
+        for region in quoteRegions {
+            textStorage.addAttribute(
+                .paragraphStyle,
+                value: quoteParagraphStyle,
+                range: region.range
+            )
+            for markerRange in region.markerRanges where markerRange.length > 0 {
+                textStorage.addAttributes(
+                    [
+                        .font: NSFont.systemFont(ofSize: 0.1),
+                        .foregroundColor: NSColor.clear
+                    ],
+                    range: markerRange
+                )
+            }
+        }
         textStorage.endEditing()
         if shouldRestoreUndoRegistration {
             undoManager?.enableUndoRegistration()
@@ -182,7 +401,9 @@ enum ComposerCodeHighlighter {
         textView.typingAttributes = typingAttributes(
             at: textView.selectedRange().location,
             textLength: textStorage.length,
-            regions: regions,
+            codeRegions: codeRegions,
+            quoteRegions: quoteRegions,
+            quoteParagraphStyle: quoteParagraphStyle,
             textStorage: textStorage,
             fallback: baseAttributes
         )
@@ -191,24 +412,34 @@ enum ComposerCodeHighlighter {
     private static func typingAttributes(
         at location: Int,
         textLength: Int,
-        regions: [ComposerCodeRegion],
+        codeRegions: [ComposerCodeRegion],
+        quoteRegions: [ComposerQuoteRegion],
+        quoteParagraphStyle: NSParagraphStyle,
         textStorage: NSTextStorage,
         fallback: [NSAttributedString.Key: Any]
     ) -> [NSAttributedString.Key: Any] {
-        guard let region = regions.first(where: { region in
+        if let region = codeRegions.first(where: { region in
             if NSLocationInRange(location, region.range) {
                 return true
             }
             guard case .fenced(isClosed: false) = region.kind else { return false }
             return location == NSMaxRange(region.range) && location == textLength
-        }), region.range.length > 0 else {
-            return fallback
+        }), region.range.length > 0 {
+            let attributeLocation = min(
+                max(location, region.range.location),
+                NSMaxRange(region.range) - 1
+            )
+            return textStorage.attributes(at: attributeLocation, effectiveRange: nil)
         }
-        let attributeLocation = min(
-            max(location, region.range.location),
-            NSMaxRange(region.range) - 1
-        )
-        return textStorage.attributes(at: attributeLocation, effectiveRange: nil)
+
+        if quoteRegions.contains(where: {
+            NSLocationInRange(location, $0.range) || location == NSMaxRange($0.range)
+        }) {
+            var attributes = fallback
+            attributes[.paragraphStyle] = quoteParagraphStyle
+            return attributes
+        }
+        return fallback
     }
 }
 
@@ -221,7 +452,7 @@ struct ComposerTextView: NSViewRepresentable {
     let onPasteImage: (Data, String, String) -> Void
     var accessibilityIdentifier = "composer-field"
     var accessibilityLabel = "Write a note"
-    var accessibilityHelp = "Command Return sends the note. Return inserts a new line. Single and triple backticks preview code formatting. Pasting a clipboard image adds it as an attachment."
+    var accessibilityHelp = "Command Return sends the note. Return inserts a new line. A greater-than sign at the start of a line previews a quote block. Single and triple backticks preview code formatting. Pasting a clipboard image adds it as an attachment."
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -248,7 +479,7 @@ struct ComposerTextView: NSViewRepresentable {
         textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
         textView.string = text
-        ComposerCodeHighlighter.apply(to: textView)
+        ComposerMarkupHighlighter.apply(to: textView)
         textView.onSend = onSend
         textView.onPasteImage = onPasteImage
         textView.setAccessibilityIdentifier(accessibilityIdentifier)
@@ -286,7 +517,7 @@ struct ComposerTextView: NSViewRepresentable {
             } else {
                 textView.setSelectedRange(NSRange(location: textLength, length: 0))
             }
-            ComposerCodeHighlighter.apply(to: textView)
+            ComposerMarkupHighlighter.apply(to: textView)
         }
 
         if focusGeneration != context.coordinator.appliedFocusGeneration,
@@ -308,7 +539,7 @@ struct ComposerTextView: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             if !textView.hasMarkedText() {
-                ComposerCodeHighlighter.apply(to: textView)
+                ComposerMarkupHighlighter.apply(to: textView)
             }
             parent.text = textView.string
         }
@@ -321,6 +552,13 @@ private final class SendingTextView: NSTextView {
     var codeBlockRanges: [NSRange] = [] {
         didSet {
             if oldValue != codeBlockRanges {
+                needsDisplay = true
+            }
+        }
+    }
+    var quoteBlockRanges: [NSRange] = [] {
+        didSet {
+            if oldValue != quoteBlockRanges {
                 needsDisplay = true
             }
         }
@@ -362,6 +600,30 @@ private final class SendingTextView: NSTextView {
             path.fill()
             path.stroke()
         }
+
+        for characterRange in quoteBlockRanges where characterRange.length > 0 {
+            let glyphRange = layoutManager.glyphRange(
+                forCharacterRange: characterRange,
+                actualCharacterRange: nil
+            )
+            var quoteRect = NSRect.null
+            layoutManager.enumerateLineFragments(
+                forGlyphRange: glyphRange
+            ) { lineRect, _, _, _, _ in
+                quoteRect = quoteRect.union(
+                    lineRect.offsetBy(dx: containerOrigin.x, dy: containerOrigin.y)
+                )
+            }
+            guard !quoteRect.isNull else { continue }
+            let barRect = NSRect(
+                x: containerOrigin.x + 2,
+                y: quoteRect.minY + 1,
+                width: 3,
+                height: max(quoteRect.height - 2, 1)
+            )
+            NSColor.separatorColor.setFill()
+            NSBezierPath(roundedRect: barRect, xRadius: 1.5, yRadius: 1.5).fill()
+        }
     }
 
     override func paste(_ sender: Any?) {
@@ -374,7 +636,39 @@ private final class SendingTextView: NSTextView {
             onPasteImage?(data, "Pasted Image.tiff", "public.tiff")
             return
         }
+        let emojiPreservingText = ComposerPasteboardText.emojiPreservingString(from: pasteboard)
+        let plainText = emojiPreservingText ?? pasteboard.string(forType: .string)
+        if isPasteInsertionInQuote,
+           let plainText,
+           plainText.contains(where: { $0.isNewline }) {
+            insertText(
+                ComposerPasteboardText.continuingQuoteString(for: plainText),
+                replacementRange: selectedRange()
+            )
+            return
+        }
+        if let text = emojiPreservingText {
+            insertText(text, replacementRange: selectedRange())
+            return
+        }
         super.paste(sender)
+    }
+
+    private var isPasteInsertionInQuote: Bool {
+        let source = string
+        let fencedCodeRanges = ComposerCodeSyntaxParser.regions(in: source).compactMap {
+            region -> NSRange? in
+            guard case .fenced = region.kind else { return nil }
+            return region.range
+        }
+        let insertionLocation = selectedRange().location
+        return ComposerQuoteSyntaxParser.regions(
+            in: source,
+            excluding: fencedCodeRanges
+        ).contains {
+            NSLocationInRange(insertionLocation, $0.range)
+                || insertionLocation == NSMaxRange($0.range)
+        }
     }
 
     override func keyDown(with event: NSEvent) {

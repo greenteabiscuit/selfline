@@ -255,6 +255,32 @@ final class LinkPreviewTests: XCTestCase {
         XCTAssertLessThan(try XCTUnwrap(markerAttributes[.font] as? NSFont).pointSize, 1)
     }
 
+    @MainActor
+    func testComposerQuoteMarkerKeepsAVisibleBodyLineHeight() throws {
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 320, height: 80))
+        textView.string = "> "
+
+        ComposerMarkupHighlighter.apply(to: textView)
+
+        let layoutManager = try XCTUnwrap(textView.layoutManager)
+        let textContainer = try XCTUnwrap(textView.textContainer)
+        layoutManager.ensureLayout(for: textContainer)
+        let glyphRange = layoutManager.glyphRange(
+            forCharacterRange: NSRange(location: 0, length: 2),
+            actualCharacterRange: nil
+        )
+        var lineHeight: CGFloat = 0
+        layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) {
+            lineRect, _, _, _, _ in
+            lineHeight = max(lineHeight, lineRect.height)
+        }
+
+        XCTAssertGreaterThanOrEqual(
+            lineHeight,
+            layoutManager.defaultLineHeight(for: .preferredFont(forTextStyle: .body))
+        )
+    }
+
     func testDetectionPreservesTextAndNormalizesOnlyRequestIdentity() throws {
         let body = "Keep HTTPS://Example.COM:443/a/../page?q=One#section exactly. Not ftp://example.com."
         let links = LinkDetector().links(in: body)

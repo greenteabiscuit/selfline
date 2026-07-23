@@ -326,6 +326,9 @@ enum ComposerMarkupHighlighter {
         quoteParagraphStyle.setParagraphStyle(NSParagraphStyle.default)
         quoteParagraphStyle.firstLineHeadIndent = 14
         quoteParagraphStyle.headIndent = 14
+        quoteParagraphStyle.minimumLineHeight = ceil(
+            bodyFont.ascender - bodyFont.descender + bodyFont.leading
+        )
         let baseAttributes: [NSAttributedString.Key: Any] = [
             .font: bodyFont,
             .foregroundColor: NSColor.textColor,

@@ -4,6 +4,50 @@ import XCTest
 @testable import SelfDMNotes
 
 final class NotePersistenceTests: XCTestCase {
+    func testV6ToV7MigrationAddsDurableReminderMetadata() throws {
+        let rootURL = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        let provider = ApplicationSupportDirectoryProvider(rootURL: rootURL)
+        try provider.prepare()
+        let noteID = UUID()
+
+        let v6Queue = try DatabaseQueue(path: provider.databaseURL.path)
+        try DatabaseMigrations.makeMigrator().migrate(
+            v6Queue,
+            upTo: "v6_create_note_threads"
+        )
+        try v6Queue.write { database in
+            try database.execute(
+                sql: "INSERT INTO notes (id, body, createdAt) VALUES (?, ?, ?)",
+                arguments: [noteID.uuidString, "Existing note", 1_700_000_000_000]
+            )
+        }
+        try v6Queue.close()
+
+        let migrated = try AppDatabase(databaseURL: provider.databaseURL)
+        let existing = try migrated.fetchNote(id: noteID)
+        XCTAssertNil(existing.reminderAt)
+        XCTAssertNil(existing.reminderCompletedAt)
+
+        let reminderAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let scheduled = try migrated.setReminder(id: noteID, at: reminderAt)
+        XCTAssertEqual(scheduled.reminderAt, reminderAt)
+        XCTAssertNil(scheduled.reminderCompletedAt)
+        try migrated.close()
+
+        let inspectionQueue = try DatabaseQueue(path: provider.databaseURL.path)
+        defer { try? inspectionQueue.close() }
+        let columns = try inspectionQueue.read { database in
+            try String.fetchAll(database, sql: "SELECT name FROM pragma_table_info('notes')")
+        }
+        XCTAssertTrue(columns.contains("reminderAt"))
+        XCTAssertTrue(columns.contains("reminderCompletedAt"))
+        let indexes = try inspectionQueue.read { database in
+            try String.fetchAll(database, sql: "SELECT name FROM pragma_index_list('notes')")
+        }
+        XCTAssertTrue(indexes.contains("notes_active_reminderAt_sortKey"))
+    }
+
     func testV5ToV6MigrationPreservesNotesAsThreadRoots() throws {
         let rootURL = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: rootURL) }
@@ -43,6 +87,94 @@ final class NotePersistenceTests: XCTestCase {
         }
         XCTAssertTrue(indexes.contains("notes_threadRootID_sortKey"))
         try inspectionQueue.close()
+    }
+
+    func testReminderSchedulingOrderingCompletionAndRemovalForRootsAndReplies() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanUp() }
+        let root = try fixture.database.createNote(body: "Root reminder")
+        let reply = try fixture.database.createReply(rootID: root.id, body: "Reply reminder")
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let rootReminder = now.addingTimeInterval(300)
+        let replyReminder = now.addingTimeInterval(120)
+
+        let scheduledRoot = try fixture.database.setReminder(id: root.id, at: rootReminder)
+        let scheduledReply = try fixture.database.setReminder(id: reply.id, at: replyReminder)
+        XCTAssertTrue(scheduledRoot.hasPendingReminder)
+        XCTAssertTrue(scheduledReply.hasPendingReminder)
+        XCTAssertFalse(scheduledRoot.isReminderDue(at: now))
+        XCTAssertTrue(scheduledReply.isReminderDue(at: replyReminder))
+        XCTAssertEqual(
+            try fixture.database.fetchReminderNotes().map(\.id),
+            [reply.id, root.id]
+        )
+
+        let editedRootReminder = now.addingTimeInterval(60)
+        let editedRoot = try fixture.database.setReminder(id: root.id, at: editedRootReminder)
+        XCTAssertEqual(editedRoot.reminderAt, editedRootReminder)
+        XCTAssertEqual(
+            try fixture.database.fetchReminderNotes().map(\.id),
+            [root.id, reply.id]
+        )
+
+        let completedAt = now.addingTimeInterval(180)
+        let completedReply = try fixture.database.markReminderDone(
+            id: reply.id,
+            completedAt: completedAt
+        )
+        XCTAssertEqual(completedReply.reminderAt, replyReminder)
+        XCTAssertEqual(completedReply.reminderCompletedAt, completedAt)
+        XCTAssertFalse(completedReply.hasPendingReminder)
+        XCTAssertFalse(completedReply.isReminderDue(at: now.addingTimeInterval(1_000)))
+        XCTAssertEqual(try fixture.database.fetchReminderNotes().map(\.id), [root.id])
+        XCTAssertThrowsError(try fixture.database.markReminderDone(id: reply.id)) {
+            XCTAssertEqual($0 as? AppDatabaseError, .reminderUnavailable)
+        }
+
+        let removedRoot = try fixture.database.removeReminder(id: root.id)
+        XCTAssertNil(removedRoot.reminderAt)
+        XCTAssertNil(removedRoot.reminderCompletedAt)
+        XCTAssertTrue(try fixture.database.fetchReminderNotes().isEmpty)
+    }
+
+    func testTrashTemporarilyHidesPendingRemindersAndRestoreRevealsThem() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanUp() }
+        let root = try fixture.database.createNote(body: "Root")
+        let reply = try fixture.database.createReply(rootID: root.id, body: "Reply")
+        let rootReminder = Date(timeIntervalSince1970: 1_800_000_000)
+        let replyReminder = rootReminder.addingTimeInterval(60)
+        _ = try fixture.database.setReminder(id: root.id, at: rootReminder)
+        _ = try fixture.database.setReminder(id: reply.id, at: replyReminder)
+
+        _ = try fixture.database.moveNoteToTrash(id: reply.id)
+        XCTAssertEqual(try fixture.database.fetchReminderNotes().map(\.id), [root.id])
+        let trashedReply = try fixture.database.fetchNote(id: reply.id)
+        XCTAssertEqual(trashedReply.reminderAt, replyReminder)
+        XCTAssertNil(trashedReply.reminderCompletedAt)
+
+        _ = try fixture.database.restoreNote(id: reply.id)
+        XCTAssertEqual(
+            try fixture.database.fetchReminderNotes().map(\.id),
+            [root.id, reply.id]
+        )
+
+        _ = try fixture.database.moveNoteToTrash(id: root.id)
+        XCTAssertTrue(try fixture.database.fetchReminderNotes().isEmpty)
+        XCTAssertEqual(try fixture.database.fetchNote(id: root.id).reminderAt, rootReminder)
+        XCTAssertEqual(try fixture.database.fetchNote(id: reply.id).reminderAt, replyReminder)
+
+        _ = try fixture.database.restoreNote(id: root.id)
+        XCTAssertEqual(
+            try fixture.database.fetchReminderNotes().map(\.id),
+            [root.id, reply.id]
+        )
+
+        _ = try fixture.database.moveNoteToTrash(id: root.id)
+        _ = try fixture.database.permanentlyDeleteNote(id: root.id)
+        XCTAssertTrue(try fixture.database.fetchReminderNotes().isEmpty)
+        XCTAssertThrowsError(try fixture.database.fetchNote(id: root.id))
+        XCTAssertThrowsError(try fixture.database.fetchNote(id: reply.id))
     }
 
     func testReplyCreationThreadFetchCountsAndPagingExclusion() throws {

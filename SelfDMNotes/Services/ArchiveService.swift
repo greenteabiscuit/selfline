@@ -880,6 +880,8 @@ extension ArchiveService {
         }
         return note.sortKey > 0
             && note.linkPreviewRevision >= 0
+            && (note.reminderCompletedAtMilliseconds == nil
+                || note.reminderAtMilliseconds != nil)
             && attachmentsAreOrdered
             && previewsAreOrdered
             && note.attachments.allSatisfy { attachment in
@@ -1509,6 +1511,12 @@ extension ArchiveService {
                     output += "- Thread: Root note\n"
                 }
             }
+            if let reminderAt = note.reminderAtMilliseconds {
+                output += "- Reminder: \(utcTimestamp(reminderAt))\n"
+                if let completedAt = note.reminderCompletedAtMilliseconds {
+                    output += "- Reminder completed: \(utcTimestamp(completedAt))\n"
+                }
+            }
             output += "- Link-preview revision: \(note.linkPreviewRevision)\n"
             if let updated = note.updatedAtMilliseconds {
                 output += "- Edited: \(utcTimestamp(updated))\n"
@@ -1797,7 +1805,8 @@ enum ArchiveDatabaseInspector {
             database,
             sql: """
                 SELECT id, body, createdAt, updatedAt, deletedAt, sortKey,
-                       linkPreviewRevision, threadRootID
+                       linkPreviewRevision, threadRootID,
+                       reminderAt, reminderCompletedAt
                 FROM notes
                 ORDER BY sortKey ASC
                 """
@@ -1919,6 +1928,8 @@ enum ArchiveDatabaseInspector {
                 deletedAtMilliseconds: row["deletedAt"],
                 sortKey: row["sortKey"],
                 threadRootID: threadRootID,
+                reminderAtMilliseconds: row["reminderAt"],
+                reminderCompletedAtMilliseconds: row["reminderCompletedAt"],
                 linkPreviewRevision: row["linkPreviewRevision"],
                 attachments: attachmentsByNote[id] ?? [],
                 linkPreviews: previewsByNote[id] ?? []
@@ -1973,6 +1984,8 @@ struct PortableNote: Codable, Equatable, Sendable {
     let deletedAtMilliseconds: Int64?
     let sortKey: Int64
     let threadRootID: UUID?
+    let reminderAtMilliseconds: Int64?
+    let reminderCompletedAtMilliseconds: Int64?
     let linkPreviewRevision: Int64
     let attachments: [PortableAttachment]
     let linkPreviews: [PortableLinkPreview]
@@ -2037,6 +2050,8 @@ struct DatabaseArchiveNote: Equatable, Sendable {
     let deletedAtMilliseconds: Int64?
     let sortKey: Int64
     let threadRootID: UUID?
+    let reminderAtMilliseconds: Int64?
+    let reminderCompletedAtMilliseconds: Int64?
     let linkPreviewRevision: Int64
     let attachments: [DatabaseArchiveAttachment]
     let linkPreviews: [PortableLinkPreview]
@@ -2084,6 +2099,8 @@ struct AllocatedArchiveNote: Sendable {
             deletedAtMilliseconds: note.deletedAtMilliseconds,
             sortKey: note.sortKey,
             threadRootID: note.threadRootID,
+            reminderAtMilliseconds: note.reminderAtMilliseconds,
+            reminderCompletedAtMilliseconds: note.reminderCompletedAtMilliseconds,
             linkPreviewRevision: note.linkPreviewRevision,
             attachments: attachments.map(\.portable),
             linkPreviews: note.linkPreviews

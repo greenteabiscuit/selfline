@@ -49,6 +49,9 @@ final class TimelineViewModel: ObservableObject {
     @Published private(set) var threadRoot: Note?
     @Published private(set) var threadReplies: [Note] = []
     @Published private(set) var isLoadingThread = false
+    @Published private(set) var reminderNotes: [Note] = []
+    @Published private(set) var reminderClock = Date()
+    @Published private(set) var isLoadingReminders = false
     @Published private(set) var pendingAttachments: [PendingAttachment] = []
     @Published private(set) var automaticLinkPreviewsEnabled = false
     @Published private(set) var isUpdatingLinkPreviewSetting = false
@@ -78,6 +81,7 @@ final class TimelineViewModel: ObservableObject {
     private var threadGeneration = 0
     private var timelineGeneration = 0
     private var trashGeneration = 0
+    private var reminderLoadGeneration = 0
     private var timelinePagingCursor: Int64?
     private var trashPagingCursor: Int64?
     private var timelinePageRequestID: UUID?
@@ -88,6 +92,7 @@ final class TimelineViewModel: ObservableObject {
     private var linkPreviewRefreshGenerations: [UUID: Int] = [:]
     private var archiveOperationTask: Task<Void, Never>?
     private var archiveOperationID: UUID?
+    private var reminderWakeTask: Task<Void, Never>?
     private var activeLibraryMutationCount = 0
 
     nonisolated static func isReplyComposerReady(
@@ -146,6 +151,10 @@ final class TimelineViewModel: ObservableObject {
             && canMutateLibrary
             && !isSending
             && !isDiscardingDraft
+    }
+
+    var dueReminderCount: Int {
+        reminderNotes.count { $0.isReminderDue(at: reminderClock) }
     }
 
     var canMutateLibrary: Bool {
@@ -248,10 +257,12 @@ final class TimelineViewModel: ObservableObject {
                     try database.verifyIntegrityAndForeignKeys()
                 }
                 let page = try database.fetchNotesPage(limit: Self.pageSize)
+                let reminderNotes = try database.fetchReminderNotes()
                 let draft = try database.loadDraft()
                 guard let store else {
                     return TimelineInitialLoadResult(
                         page: page,
+                        reminderNotes: reminderNotes,
                         draft: draft,
                         recoveredAttachments: [],
                         maintenanceReport: nil,
@@ -262,6 +273,7 @@ final class TimelineViewModel: ObservableObject {
                 do {
                     return TimelineInitialLoadResult(
                         page: page,
+                        reminderNotes: reminderNotes,
                         draft: draft,
                         recoveredAttachments: recoveredAttachments,
                         maintenanceReport: try store.performStartupMaintenance(
@@ -272,6 +284,7 @@ final class TimelineViewModel: ObservableObject {
                 } catch {
                     return TimelineInitialLoadResult(
                         page: page,
+                        reminderNotes: reminderNotes,
                         draft: draft,
                         recoveredAttachments: recoveredAttachments,
                         maintenanceReport: nil,
@@ -285,6 +298,7 @@ final class TimelineViewModel: ObservableObject {
                 return
             }
             notes = result.page.notes
+            reminderNotes = result.reminderNotes
             hasOlderNotes = result.page.hasOlder
             timelinePagingCursor = result.page.notes.first?.sortKey
             draftText = result.draft?.body ?? ""
@@ -366,6 +380,7 @@ final class TimelineViewModel: ObservableObject {
             }
             restoreStartupStatus = nil
             isReady = true
+            scheduleReminderWakeUp()
             if let linkPreviewCoordinator {
                 await linkPreviewCoordinator.resumeBackgroundWork()
             }
@@ -640,6 +655,57 @@ final class TimelineViewModel: ObservableObject {
                 "The edit was not saved. The edit window remains open so you can retry or copy the text. Details: \(error.localizedDescription)"
             )
             return false
+        }
+    }
+
+    func reloadReminders() async {
+        guard let database else { return }
+        reminderLoadGeneration += 1
+        let generation = reminderLoadGeneration
+        isLoadingReminders = true
+        do {
+            let loaded = try await Task.detached(priority: .userInitiated) {
+                try database.fetchReminderNotes()
+            }.value
+            guard generation == reminderLoadGeneration else { return }
+            reminderNotes = loaded
+            isLoadingReminders = false
+            scheduleReminderWakeUp()
+        } catch {
+            guard generation == reminderLoadGeneration else { return }
+            isLoadingReminders = false
+            presentError(
+                "Reminders could not be loaded. Close and reopen Reminders to retry. Details: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    func refreshReminderClock() {
+        scheduleReminderWakeUp()
+    }
+
+    func setReminder(for note: Note, at reminderAt: Date) async -> Bool {
+        guard reminderAt > Date() else {
+            presentError("Choose a reminder time in the future.")
+            return false
+        }
+        guard canMutateLibrary, let database else { return false }
+        return await mutateReminder(successMessage: "Reminder set.") {
+            try database.setReminder(id: note.id, at: reminderAt)
+        }
+    }
+
+    func markReminderDone(_ note: Note) async -> Bool {
+        guard canMutateLibrary, let database else { return false }
+        return await mutateReminder(successMessage: "Reminder marked as done.") {
+            try database.markReminderDone(id: note.id)
+        }
+    }
+
+    func removeReminder(_ note: Note) async -> Bool {
+        guard canMutateLibrary, let database else { return false }
+        return await mutateReminder(successMessage: "Reminder removed.") {
+            try database.removeReminder(id: note.id)
         }
     }
 
@@ -1242,6 +1308,7 @@ final class TimelineViewModel: ObservableObject {
                ) {
                 Self.insertInOrder(deletedNote, into: &trashNotes)
             }
+            await reloadReminders()
             refreshSearchIfNeeded()
             presentNotice("Note moved to Trash.")
             await refillTimelineIfNeeded()
@@ -1374,6 +1441,7 @@ final class TimelineViewModel: ObservableObject {
                     }
                 }
             }
+            await reloadReminders()
             refreshSearchIfNeeded()
             presentNotice("Note restored.")
             await refillTrashIfNeeded()
@@ -1408,6 +1476,7 @@ final class TimelineViewModel: ObservableObject {
             if let linkPreviewCoordinator {
                 await linkPreviewCoordinator.noteBecameIneligible()
             }
+            await reloadReminders()
             refreshSearchIfNeeded()
             if deletionResult.managedFileCleanupFailed {
                 presentNotice(
@@ -2179,6 +2248,8 @@ final class TimelineViewModel: ObservableObject {
             deletedAt: note.deletedAt,
             sortKey: note.sortKey,
             threadRootID: note.threadRootID,
+            reminderAt: note.reminderAt,
+            reminderCompletedAt: note.reminderCompletedAt,
             replyCount: note.replyCount,
             attachments: note.attachments,
             linkPreviews: linkPreviews
@@ -2197,6 +2268,8 @@ final class TimelineViewModel: ObservableObject {
             deletedAt: note.deletedAt,
             sortKey: note.sortKey,
             threadRootID: note.threadRootID,
+            reminderAt: note.reminderAt,
+            reminderCompletedAt: note.reminderCompletedAt,
             replyCount: note.replyCount,
             attachments: note.attachments,
             linkPreviews: linkPreviews
@@ -2207,6 +2280,81 @@ final class TimelineViewModel: ObservableObject {
         guard !notes.contains(where: { $0.id == note.id }) else { return }
         let insertionIndex = notes.firstIndex { $0.sortKey > note.sortKey } ?? notes.endIndex
         notes.insert(note, at: insertionIndex)
+    }
+
+    private func mutateReminder(
+        successMessage: String,
+        operation: @escaping @Sendable () throws -> Note
+    ) async -> Bool {
+        activeLibraryMutationCount += 1
+        defer { activeLibraryMutationCount -= 1 }
+        do {
+            let updatedNote = try await Task.detached(
+                priority: .userInitiated,
+                operation: operation
+            ).value
+            reminderLoadGeneration += 1
+            isLoadingReminders = false
+            applyReminderChange(updatedNote)
+            presentNotice(successMessage)
+            return true
+        } catch {
+            presentError(
+                "The reminder change was not saved. Retry the action. Details: \(error.localizedDescription)"
+            )
+            return false
+        }
+    }
+
+    private func applyReminderChange(_ note: Note) {
+        Self.replaceNote(note, in: &notes)
+        Self.replaceNote(note, in: &trashNotes)
+        if threadRoot?.id == note.id {
+            threadRoot = note
+        }
+        Self.replaceNote(note, in: &threadReplies)
+        if note.hasPendingReminder {
+            if let index = reminderNotes.firstIndex(where: { $0.id == note.id }) {
+                reminderNotes[index] = note
+            } else {
+                reminderNotes.append(note)
+            }
+            reminderNotes.sort(by: Self.reminderOrder)
+        } else {
+            reminderNotes.removeAll { $0.id == note.id }
+        }
+        scheduleReminderWakeUp()
+    }
+
+    private static func reminderOrder(_ lhs: Note, _ rhs: Note) -> Bool {
+        guard let lhsDate = lhs.reminderAt, let rhsDate = rhs.reminderAt else {
+            return lhs.sortKey < rhs.sortKey
+        }
+        return lhsDate == rhsDate ? lhs.sortKey < rhs.sortKey : lhsDate < rhsDate
+    }
+
+    private func scheduleReminderWakeUp() {
+        reminderWakeTask?.cancel()
+        reminderWakeTask = nil
+        let now = Date()
+        reminderClock = now
+        guard let nextReminder = reminderNotes.compactMap(\.reminderAt)
+            .filter({ $0 > now })
+            .min() else { return }
+        let delay = max(nextReminder.timeIntervalSince(now), 0)
+        let maximumDelay = TimeInterval(UInt64.max / 1_000_000_000)
+        let nanoseconds = delay >= maximumDelay
+            ? UInt64.max
+            : UInt64(delay * 1_000_000_000)
+        reminderWakeTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self else { return }
+            self.scheduleReminderWakeUp()
+        }
     }
 
     private static func belongsInLoadedWindow(
@@ -2235,6 +2383,7 @@ private enum PendingAttachmentSource: Sendable {
 
 private struct TimelineInitialLoadResult: Sendable {
     let page: NotePage
+    let reminderNotes: [Note]
     let draft: Draft?
     let recoveredAttachments: [RecoveredStagedAttachment]
     let maintenanceReport: AttachmentMaintenanceReport?

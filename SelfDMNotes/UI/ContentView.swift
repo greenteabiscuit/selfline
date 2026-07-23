@@ -6,6 +6,7 @@ struct ContentView: View {
     private static let newestAnchor = "newest-note-anchor"
 
     private enum HeaderFocus: Hashable {
+        case reminders
         case search
         case settings
         case trash
@@ -25,6 +26,9 @@ struct ContentView: View {
     @State private var composerFocusGeneration = 0
     @State private var searchFocusGeneration = 0
     @State private var isSearchPresented = false
+    @State private var showReminders = false
+    @State private var reminderEditorNote: Note?
+    @State private var reminderNavigationNote: Note?
     @State private var didInitialScroll = false
     @State private var isNearBottom = true
     @State private var showNewestAction = false
@@ -104,6 +108,14 @@ struct ContentView: View {
                 isSearchPresented = false
                 composerFocusGeneration += 1
             }
+            .onChange(of: reminderNavigationNote) { _, note in
+                guard let note else { return }
+                reminderNavigationNote = nil
+                selectSearchResult(
+                    NoteSearchResult(note: note, matchedTerms: [], relevance: nil),
+                    proxy: proxy
+                )
+            }
             .onReceive(NotificationCenter.default.publisher(for: .focusNoteSearch)) { _ in
                 presentSearch()
             }
@@ -131,6 +143,8 @@ struct ContentView: View {
             .onChange(of: scenePhase) { _, phase in
                 if phase != .active {
                     model.flushDraftSynchronously()
+                } else {
+                    Task { await model.reloadReminders() }
                 }
             }
             .onDisappear {
@@ -157,6 +171,14 @@ struct ContentView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(item: $editingNote, onDismiss: restoreEditedNoteFocus) { note in
             EditNoteView(note: note, model: model)
+        }
+        .sheet(item: $reminderEditorNote, onDismiss: restoreComposerFocus) { note in
+            ReminderEditorView(note: note, model: model)
+        }
+        .sheet(isPresented: $showReminders, onDismiss: { headerFocus = .reminders }) {
+            RemindersView(model: model) { note in
+                selectReminder(note)
+            }
         }
         .sheet(isPresented: $showTrash, onDismiss: { headerFocus = .trash }) {
             TrashView(model: model)
@@ -227,6 +249,14 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button(remindersButtonTitle, systemImage: dueReminderCount > 0 ? "bell.badge.fill" : "bell") {
+                showReminders = true
+            }
+            .focused($headerFocus, equals: .reminders)
+            .accessibilityIdentifier("reminders-button")
+            .accessibilityLabel(remindersAccessibilityLabel)
+            .accessibilityHint("Shows active reminders for notes and thread replies.")
+            .disabled(launchStatus.errorMessage != nil || !model.isReady)
             Button("Search", systemImage: "magnifyingglass") {
                 presentSearch()
             }
@@ -378,7 +408,7 @@ struct ContentView: View {
                                     DateSeparator(date: note.createdAt)
                                 }
                                 if model.searchTargetNoteID == note.id {
-                                    Label("Selected search result", systemImage: "scope")
+                                    Label("Selected note", systemImage: "scope")
                                         .font(.caption.weight(.semibold))
                                         .accessibilityIdentifier("selected-search-result")
                                 }
@@ -389,6 +419,9 @@ struct ContentView: View {
                                     edit: {
                                         editingReturnNoteID = note.id
                                         editingNote = note
+                                    },
+                                    editReminder: {
+                                        reminderEditorNote = note
                                     },
                                     moveToTrash: {
                                         Task { await model.moveNoteToTrash(note) }
@@ -645,6 +678,9 @@ struct ContentView: View {
                                     editingReturnNoteID = root.id
                                     editingNote = root
                                 },
+                                editReminder: {
+                                    reminderEditorNote = root
+                                },
                                 moveToTrash: {
                                     Task { await model.moveNoteToTrash(root) }
                                 }
@@ -667,6 +703,9 @@ struct ContentView: View {
                                     edit: {
                                         editingReturnNoteID = reply.id
                                         editingNote = reply
+                                    },
+                                    editReminder: {
+                                        reminderEditorNote = reply
                                     },
                                     moveToTrash: {
                                         Task { await model.moveNoteToTrash(reply) }
@@ -763,7 +802,7 @@ struct ContentView: View {
                     },
                     accessibilityIdentifier: "reply-composer-field",
                     accessibilityLabel: "Write a reply",
-                    accessibilityHelp: "Command Return sends the reply. Return inserts a new line. A greater-than sign at the start of a line previews a quote block. Single and triple backticks preview code formatting. Pasting a clipboard image adds it to this reply."
+                    accessibilityHelp: "Command Return sends the reply. Return inserts a new line and continues a quote or list. Return again on an empty quoted or top-level list line exits it. A greater-than sign starts a quote, a hyphen starts bullets, and one followed by a period starts numbering. Tab and Shift Tab change list nesting. Single and triple backticks preview code formatting. Pasting a clipboard image adds it to this reply."
                 )
                 .frame(minHeight: 48, maxHeight: 110)
 
@@ -817,6 +856,19 @@ struct ContentView: View {
         return session.text.unicodeScalars.contains {
             !CharacterSet.whitespacesAndNewlines.contains($0)
         } || !session.attachments.isEmpty
+    }
+
+    private var dueReminderCount: Int {
+        model.reminderNotes.filter { $0.isReminderDue(at: model.reminderClock) }.count
+    }
+
+    private var remindersButtonTitle: String {
+        dueReminderCount == 0 ? "Reminders" : "Reminders \(dueReminderCount)"
+    }
+
+    private var remindersAccessibilityLabel: String {
+        guard dueReminderCount > 0 else { return "Reminders" }
+        return "Reminders, \(dueReminderCount) due"
     }
 
     private func presentThread(rootID: UUID) {
@@ -1171,6 +1223,10 @@ struct ContentView: View {
         }
     }
 
+    private func selectReminder(_ note: Note) {
+        reminderNavigationNote = note
+    }
+
     nonisolated static func requiresThreadClosure(
         requestedRootID: UUID?,
         destinationRootID: UUID,
@@ -1366,6 +1422,7 @@ private struct ThreadPanelNoteRow: View {
     @ObservedObject var model: TimelineViewModel
     let copy: () -> Void
     let edit: () -> Void
+    let editReminder: () -> Void
     let moveToTrash: () -> Void
 
     var body: some View {
@@ -1375,7 +1432,7 @@ private struct ThreadPanelNoteRow: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 if isSearchTarget {
-                    Label("Selected search result", systemImage: "scope")
+                    Label("Selected reply", systemImage: "scope")
                         .font(.caption.weight(.semibold))
                         .accessibilityIdentifier("selected-thread-search-result")
                 }
@@ -1403,6 +1460,8 @@ private struct ThreadPanelNoteRow: View {
                 NoteLinkPreviewsView(previews: note.linkPreviews, model: model)
             }
 
+            ReminderStatusLabel(note: note, now: model.reminderClock)
+
             HStack {
                 if let updatedAt = note.updatedAt {
                     Text("Edited")
@@ -1420,6 +1479,22 @@ private struct ThreadPanelNoteRow: View {
                     Button("Edit", systemImage: "pencil", action: edit)
                         .disabled(!model.canMutateLibrary)
                     Divider()
+                    if note.hasPendingReminder {
+                        Button("Edit Reminder…", systemImage: "clock", action: editReminder)
+                            .disabled(!model.canMutateLibrary)
+                        Button("Mark Reminder as Done", systemImage: "checkmark") {
+                            Task { await model.markReminderDone(note) }
+                        }
+                        .disabled(!model.canMutateLibrary)
+                        Button("Remove Reminder", systemImage: "bell.slash") {
+                            Task { await model.removeReminder(note) }
+                        }
+                        .disabled(!model.canMutateLibrary)
+                    } else {
+                        Button("Set Reminder…", systemImage: "bell", action: editReminder)
+                            .disabled(!model.canMutateLibrary)
+                    }
+                    Divider()
                     Button(
                         note.isReply ? "Move Reply to Trash" : "Move Thread to Trash",
                         systemImage: "trash",
@@ -1433,13 +1508,16 @@ private struct ThreadPanelNoteRow: View {
                 .accessibilityLabel(note.isReply ? "Reply actions" : "Root note actions")
                 .accessibilityHint(
                     note.isReply
-                        ? "Copy text, edit, or move this reply to Trash."
-                        : "Copy text, edit, or move this root and its active replies to Trash."
+                        ? "Copy text, edit, manage its reminder, or move this reply to Trash."
+                        : "Copy text, edit, manage its reminder, or move this root and its active replies to Trash."
                 )
             }
         }
         .padding(10)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
+        .background(
+            note.isReminderDue(at: model.reminderClock) ? Color.blue.opacity(0.16) : Color(nsColor: .controlBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 9)
+        )
         .accessibilityElement(children: .contain)
     }
 }

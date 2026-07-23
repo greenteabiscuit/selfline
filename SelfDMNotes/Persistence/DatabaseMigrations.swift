@@ -7,7 +7,8 @@ enum DatabaseMigrations {
         "v3_create_managed_attachments",
         "v4_index_attachment_filenames",
         "v5_create_link_previews_and_index_metadata",
-        "v6_create_note_threads"
+        "v6_create_note_threads",
+        "v7_create_note_reminders"
     ]
 
     static var currentSchemaVersion: Int { identifiers.count }
@@ -712,6 +713,32 @@ enum DatabaseMigrations {
                 WHEN new.threadRootID IS NOT old.threadRootID
                 BEGIN
                     SELECT RAISE(ABORT, 'thread root is immutable');
+                END;
+                """)
+        }
+        migrator.registerMigration(identifiers[6]) { database in
+            try database.execute(sql: """
+                ALTER TABLE notes ADD COLUMN reminderAt INTEGER;
+                ALTER TABLE notes ADD COLUMN reminderCompletedAt INTEGER;
+
+                CREATE INDEX notes_active_reminderAt_sortKey
+                    ON notes(reminderAt, sortKey)
+                    WHERE deletedAt IS NULL
+                      AND reminderAt IS NOT NULL
+                      AND reminderCompletedAt IS NULL;
+
+                CREATE TRIGGER notes_reminder_insert
+                BEFORE INSERT ON notes
+                WHEN new.reminderCompletedAt IS NOT NULL AND new.reminderAt IS NULL
+                BEGIN
+                    SELECT RAISE(ABORT, 'completed reminder requires a scheduled time');
+                END;
+
+                CREATE TRIGGER notes_reminder_update
+                BEFORE UPDATE OF reminderAt, reminderCompletedAt ON notes
+                WHEN new.reminderCompletedAt IS NOT NULL AND new.reminderAt IS NULL
+                BEGIN
+                    SELECT RAISE(ABORT, 'completed reminder requires a scheduled time');
                 END;
                 """)
         }

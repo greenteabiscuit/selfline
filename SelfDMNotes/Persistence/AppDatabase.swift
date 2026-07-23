@@ -320,7 +320,10 @@ final class AppDatabase: @unchecked Sendable {
         let radius = min(requestedRadius, Self.maximumPageSize / 2)
         return try queue.read { database in
             let selected = try Self.fetchActiveRootNote(id: noteID, from: database)
-            let columns = "id, body, createdAt, updatedAt, deletedAt, sortKey, threadRootID"
+            let columns = """
+                id, body, createdAt, updatedAt, deletedAt, sortKey, threadRootID,
+                reminderAt, reminderCompletedAt
+                """
             let olderRows = try Row.fetchAll(
                 database,
                 sql: """
@@ -394,7 +397,8 @@ final class AppDatabase: @unchecked Sendable {
             let rows = try Row.fetchAll(
                 database,
                 sql: """
-                    SELECT id, body, createdAt, updatedAt, deletedAt, sortKey, threadRootID
+                    SELECT id, body, createdAt, updatedAt, deletedAt, sortKey, threadRootID,
+                           reminderAt, reminderCompletedAt
                     FROM notes
                     WHERE threadRootID = ? AND deletedAt IS NULL
                     ORDER BY sortKey ASC
@@ -410,6 +414,24 @@ final class AppDatabase: @unchecked Sendable {
     func fetchReplyCounts(rootIDs: [UUID]) throws -> [UUID: Int] {
         try queue.read { database in
             try Self.fetchReplyCounts(rootIDs: rootIDs, from: database)
+        }
+    }
+
+    func fetchReminderNotes() throws -> [Note] {
+        try queue.read { database in
+            let rows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT id, body, createdAt, updatedAt, deletedAt, sortKey, threadRootID,
+                           reminderAt, reminderCompletedAt
+                    FROM notes
+                    WHERE deletedAt IS NULL
+                      AND reminderAt IS NOT NULL
+                      AND reminderCompletedAt IS NULL
+                    ORDER BY reminderAt ASC, sortKey ASC
+                    """
+            )
+            return try Self.notesWithAttachments(try rows.map(Self.note(from:)), from: database)
         }
     }
 
@@ -434,6 +456,58 @@ final class AppDatabase: @unchecked Sendable {
             )
             guard database.changesCount == 1 else {
                 throw AppDatabaseError.noteUnavailable
+            }
+            return try Self.fetchNote(id: id, from: database)
+        }
+    }
+
+    func setReminder(id: UUID, at reminderAt: Date) throws -> Note {
+        try queue.write { database in
+            try database.execute(
+                sql: """
+                    UPDATE notes
+                    SET reminderAt = ?, reminderCompletedAt = NULL
+                    WHERE id = ? AND deletedAt IS NULL
+                    """,
+                arguments: [Self.encode(reminderAt), id.uuidString]
+            )
+            guard database.changesCount == 1 else {
+                throw AppDatabaseError.noteUnavailable
+            }
+            return try Self.fetchNote(id: id, from: database)
+        }
+    }
+
+    func markReminderDone(id: UUID, completedAt: Date = Date()) throws -> Note {
+        try queue.write { database in
+            try database.execute(
+                sql: """
+                    UPDATE notes
+                    SET reminderCompletedAt = ?
+                    WHERE id = ? AND deletedAt IS NULL
+                      AND reminderAt IS NOT NULL AND reminderCompletedAt IS NULL
+                    """,
+                arguments: [Self.encode(completedAt), id.uuidString]
+            )
+            guard database.changesCount == 1 else {
+                throw AppDatabaseError.reminderUnavailable
+            }
+            return try Self.fetchNote(id: id, from: database)
+        }
+    }
+
+    func removeReminder(id: UUID) throws -> Note {
+        try queue.write { database in
+            try database.execute(
+                sql: """
+                    UPDATE notes
+                    SET reminderAt = NULL, reminderCompletedAt = NULL
+                    WHERE id = ? AND deletedAt IS NULL AND reminderAt IS NOT NULL
+                    """,
+                arguments: [id.uuidString]
+            )
+            guard database.changesCount == 1 else {
+                throw AppDatabaseError.reminderUnavailable
             }
             return try Self.fetchNote(id: id, from: database)
         }
@@ -1345,7 +1419,8 @@ final class AppDatabase: @unchecked Sendable {
                 rows = try Row.fetchAll(
                     database,
                     sql: """
-                        SELECT id, body, createdAt, updatedAt, deletedAt, sortKey, threadRootID
+                        SELECT id, body, createdAt, updatedAt, deletedAt, sortKey, threadRootID,
+                               reminderAt, reminderCompletedAt
                         FROM notes
                         WHERE \(deletionPredicate) AND sortKey < ?
                         ORDER BY sortKey DESC
@@ -1357,7 +1432,8 @@ final class AppDatabase: @unchecked Sendable {
                 rows = try Row.fetchAll(
                     database,
                     sql: """
-                        SELECT id, body, createdAt, updatedAt, deletedAt, sortKey, threadRootID
+                        SELECT id, body, createdAt, updatedAt, deletedAt, sortKey, threadRootID,
+                               reminderAt, reminderCompletedAt
                         FROM notes
                         WHERE \(deletionPredicate)
                         ORDER BY sortKey DESC
@@ -1380,7 +1456,8 @@ final class AppDatabase: @unchecked Sendable {
         guard let row = try Row.fetchOne(
             database,
             sql: """
-                SELECT id, body, createdAt, updatedAt, deletedAt, sortKey, threadRootID
+                SELECT id, body, createdAt, updatedAt, deletedAt, sortKey, threadRootID,
+                       reminderAt, reminderCompletedAt
                 FROM notes
                 WHERE id = ?
                 """,
@@ -1395,7 +1472,8 @@ final class AppDatabase: @unchecked Sendable {
         guard let row = try Row.fetchOne(
             database,
             sql: """
-                SELECT id, body, createdAt, updatedAt, deletedAt, sortKey, threadRootID
+                SELECT id, body, createdAt, updatedAt, deletedAt, sortKey, threadRootID,
+                       reminderAt, reminderCompletedAt
                 FROM notes
                 WHERE id = ? AND deletedAt IS NULL AND threadRootID IS NULL
                 """,
@@ -1486,6 +1564,7 @@ final class AppDatabase: @unchecked Sendable {
         let selectionSQL = """
             SELECT notes.id, notes.body, notes.createdAt, notes.updatedAt,
                    notes.deletedAt, notes.sortKey, notes.threadRootID,
+                   notes.reminderAt, notes.reminderCompletedAt,
                    \(relevance) AS relevance
             FROM \(from)
             WHERE \(predicates.joined(separator: " AND "))
@@ -1512,6 +1591,8 @@ final class AppDatabase: @unchecked Sendable {
         let deletedAt: Int64? = row["deletedAt"]
         let sortKey: Int64 = row["sortKey"]
         let threadRootIDString: String? = row["threadRootID"]
+        let reminderAt: Int64? = row["reminderAt"]
+        let reminderCompletedAt: Int64? = row["reminderCompletedAt"]
         let threadRootID: UUID?
         if let threadRootIDString {
             guard let parsed = UUID(uuidString: threadRootIDString) else {
@@ -1528,7 +1609,9 @@ final class AppDatabase: @unchecked Sendable {
             updatedAt: updatedAt.map(decode),
             deletedAt: deletedAt.map(decode),
             sortKey: sortKey,
-            threadRootID: threadRootID
+            threadRootID: threadRootID,
+            reminderAt: reminderAt.map(decode),
+            reminderCompletedAt: reminderCompletedAt.map(decode)
         )
     }
 
@@ -1607,6 +1690,8 @@ final class AppDatabase: @unchecked Sendable {
                 deletedAt: note.deletedAt,
                 sortKey: note.sortKey,
                 threadRootID: note.threadRootID,
+                reminderAt: note.reminderAt,
+                reminderCompletedAt: note.reminderCompletedAt,
                 replyCount: replyCountsByRoot[note.id] ?? 0,
                 attachments: attachmentsByNote[note.id] ?? [],
                 linkPreviews: previewsByNote[note.id] ?? []
@@ -1882,6 +1967,7 @@ enum AppDatabaseError: LocalizedError, Equatable {
     case invalidThreadRoot
     case linkPreviewUnavailable
     case noteUnavailable
+    case reminderUnavailable
     case settingsUnavailable
     case unavailableSearchFilter
 
@@ -1921,6 +2007,8 @@ enum AppDatabaseError: LocalizedError, Equatable {
             "The link preview no longer exists or is not available for that action."
         case .noteUnavailable:
             "The note no longer exists or is not available for that action."
+        case .reminderUnavailable:
+            "The reminder no longer exists or has already been completed."
         case .settingsUnavailable:
             "Link preview settings could not be updated."
         case .unavailableSearchFilter:

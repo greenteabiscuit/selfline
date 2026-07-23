@@ -27,6 +27,17 @@ final class LinkPreviewTests: XCTestCase {
         }
     }
 
+    func testLocalhostLinkRemainsClickableAndBlueWithoutBeingUnfurled() throws {
+        let body = "Open http://localhost:3000/path"
+        let attributed = NoteBodyLinkFormatter.attributedString(for: body)
+        let linkedRun = try XCTUnwrap(attributed.runs.first { $0.link != nil })
+
+        XCTAssertEqual(linkedRun.link, try XCTUnwrap(URL(string: "http://localhost:3000/path")))
+        XCTAssertEqual(linkedRun.foregroundColor, Color(nsColor: .linkColor))
+        XCTAssertNotNil(linkedRun.underlineStyle)
+        XCTAssertTrue(LinkDetector().links(in: body).isEmpty)
+    }
+
     func testNoteBodyMarkupParsesInlineCodeAndLeavesUnclosedDelimiterLiteral() {
         XCTAssertEqual(
             NoteBodyMarkupParser.inlineSegments(in: "Run `swift test` now"),
@@ -38,7 +49,7 @@ final class LinkPreviewTests: XCTestCase {
         )
     }
 
-    func testNoteBodyMarkupParsesFencedCodeAndOptionalLanguage() {
+    func testNoteBodyMarkupParsesSameLineAndMultilineFencedCode() {
         let body = "Before\n```swift\nlet greeting = \"こんにちは 👋\"\n  print(greeting)\n```\nAfter"
 
         XCTAssertEqual(
@@ -46,18 +57,29 @@ final class LinkPreviewTests: XCTestCase {
             [
                 .prose("Before"),
                 .code(
-                    language: "swift",
-                    text: "let greeting = \"こんにちは 👋\"\n  print(greeting)"
+                    language: nil,
+                    text: "swift\nlet greeting = \"こんにちは 👋\"\n  print(greeting)"
                 ),
                 .prose("After")
             ]
         )
     }
 
-    func testNoteBodyMarkupLeavesUnclosedFenceLiteral() {
+    func testNoteBodyMarkupTreatsUnclosedFenceAsCodeThroughEndOfNote() {
         let body = "Before\n```swift\nlet unfinished = true"
 
-        XCTAssertEqual(NoteBodyMarkupParser.blocks(in: body), [.prose(body)])
+        XCTAssertEqual(
+            NoteBodyMarkupParser.blocks(in: body),
+            [.prose("Before"), .code(language: nil, text: "swift\nlet unfinished = true")]
+        )
+        XCTAssertEqual(
+            NoteBodyMarkupParser.blocks(in: "```hello"),
+            [.code(language: nil, text: "hello")]
+        )
+        XCTAssertEqual(
+            NoteBodyMarkupParser.blocks(in: "```print(`value`)"),
+            [.code(language: nil, text: "print(`value`)")]
+        )
     }
 
     func testNoteBodyFormattingLinksOnlyOutsideCode() throws {
@@ -99,6 +121,46 @@ final class LinkPreviewTests: XCTestCase {
         )
     }
 
+    func testNoteBodyMarkupParsesNestedBulletAndOrderedLists() {
+        let body = "Before\n- First\n  - Second\n    - Third\n1. One\n  1. Child one\n  2. Child two\n2. Two\nAfter"
+        let items = [
+            NoteBodyListItem(kind: .unordered, depth: 0, content: "First", sourceMarker: "-"),
+            NoteBodyListItem(kind: .unordered, depth: 1, content: "Second", sourceMarker: "-"),
+            NoteBodyListItem(kind: .unordered, depth: 2, content: "Third", sourceMarker: "-"),
+            NoteBodyListItem(kind: .ordered, depth: 0, content: "One", sourceMarker: "1."),
+            NoteBodyListItem(
+                kind: .ordered,
+                depth: 1,
+                content: "Child one",
+                sourceMarker: "1."
+            ),
+            NoteBodyListItem(
+                kind: .ordered,
+                depth: 1,
+                content: "Child two",
+                sourceMarker: "2."
+            ),
+            NoteBodyListItem(kind: .ordered, depth: 0, content: "Two", sourceMarker: "2.")
+        ]
+
+        XCTAssertEqual(
+            NoteBodyMarkupParser.blocks(in: body),
+            [.prose("Before"), .list(items), .prose("After")]
+        )
+        XCTAssertEqual(
+            NoteListSyntaxParser.displayMarkers(for: items),
+            ["•", "◦", "▪", "1.", "a.", "b.", "2."]
+        )
+        XCTAssertEqual(
+            NoteListSyntaxParser.displayMarkers(
+                for: NoteListSyntaxParser.sourceItems(
+                    in: "1. First list\nPlain text\n1. Second list"
+                )
+            ),
+            ["1.", "1."]
+        )
+    }
+
     func testComposerCodeSyntaxFindsInlineAndFencedRegions() {
         let body = "Use `value` here\n```swift\nlet value = `literal`\n```\nDone"
         let source = body as NSString
@@ -114,7 +176,7 @@ final class LinkPreviewTests: XCTestCase {
                     kind: .fenced(isClosed: true),
                     range: source.range(of: "```swift\nlet value = `literal`\n```"),
                     markerRanges: [
-                        source.range(of: "```swift"),
+                        NSRange(location: source.range(of: "```swift").location, length: 3),
                         source.range(of: "```", options: [], range: NSRange(
                             location: source.range(of: "let value = `literal`").upperBound,
                             length: source.length
@@ -127,7 +189,7 @@ final class LinkPreviewTests: XCTestCase {
     }
 
     func testComposerCodeSyntaxTreatsOpenFenceAsLiveCodeBlock() {
-        let body = "Before\n```\nlet value = 1"
+        let body = "Before\n```hello\nlet value = 1"
         let source = body as NSString
 
         XCTAssertEqual(
@@ -135,10 +197,66 @@ final class LinkPreviewTests: XCTestCase {
             [
                 ComposerCodeRegion(
                     kind: .fenced(isClosed: false),
-                    range: source.range(of: "```\nlet value = 1"),
-                    markerRanges: [source.range(of: "```")]
+                    range: source.range(of: "```hello\nlet value = 1"),
+                    markerRanges: [
+                        NSRange(location: source.range(of: "```hello").location, length: 3)
+                    ]
                 )
             ]
+        )
+    }
+
+    func testComposerReturnExitsCodeBlockAfterTheSecondNewline() throws {
+        let firstLine = "```hello"
+        XCTAssertNil(
+            ComposerCodeEditing.returnEdit(
+                in: firstLine,
+                selectedRange: NSRange(location: (firstLine as NSString).length, length: 0)
+            )
+        )
+
+        let continued = firstLine + "\n"
+        let exitEdit = try XCTUnwrap(
+            ComposerCodeEditing.returnEdit(
+                in: continued,
+                selectedRange: NSRange(location: (continued as NSString).length, length: 0)
+            )
+        )
+        let escaped = (continued as NSString).replacingCharacters(
+            in: exitEdit.range,
+            with: exitEdit.replacement
+        )
+
+        XCTAssertEqual(escaped, "```hello\n```\n")
+        XCTAssertEqual(
+            exitEdit.selectionAfterEdit,
+            NSRange(location: (escaped as NSString).length, length: 0)
+        )
+        XCTAssertEqual(
+            ComposerCodeSyntaxParser.regions(in: escaped).map(\.kind),
+            [.fenced(isClosed: true)]
+        )
+        XCTAssertEqual(
+            NoteBodyMarkupParser.blocks(in: escaped),
+            [.code(language: nil, text: "hello")]
+        )
+    }
+
+    func testComposerReturnOnlyExitsAnEmptyTrailingOpenCodeLine() {
+        let closed = "```hello\n```\n"
+        let openWithContent = "```hello\nworld"
+
+        XCTAssertNil(
+            ComposerCodeEditing.returnEdit(
+                in: closed,
+                selectedRange: NSRange(location: (closed as NSString).length, length: 0)
+            )
+        )
+        XCTAssertNil(
+            ComposerCodeEditing.returnEdit(
+                in: openWithContent,
+                selectedRange: NSRange(location: (openWithContent as NSString).length, length: 0)
+            )
         )
     }
 
@@ -208,6 +326,220 @@ final class LinkPreviewTests: XCTestCase {
             ),
             "First line\n> Already quoted"
         )
+    }
+
+    func testComposerReturnContinuesQuoteUntilTheSecondNewline() throws {
+        let firstLine = "> hello"
+        let continueEdit = try XCTUnwrap(
+            ComposerQuoteEditing.returnEdit(
+                in: firstLine,
+                selectedRange: NSRange(location: (firstLine as NSString).length, length: 0)
+            )
+        )
+        let continued = (firstLine as NSString).replacingCharacters(
+            in: continueEdit.range,
+            with: continueEdit.replacement
+        )
+
+        XCTAssertEqual(continued, "> hello\n> ")
+
+        let exitEdit = try XCTUnwrap(
+            ComposerQuoteEditing.returnEdit(
+                in: continued,
+                selectedRange: NSRange(location: (continued as NSString).length, length: 0)
+            )
+        )
+        XCTAssertEqual(
+            (continued as NSString).replacingCharacters(
+                in: exitEdit.range,
+                with: exitEdit.replacement
+            ),
+            "> hello\n\n"
+        )
+    }
+
+    func testComposerReturnDoesNotContinueQuoteInsideFencedCode() {
+        let body = "```\n> literal"
+
+        XCTAssertNil(
+            ComposerQuoteEditing.returnEdit(
+                in: body,
+                selectedRange: NSRange(location: (body as NSString).length, length: 0)
+            )
+        )
+    }
+
+    func testComposerReturnContinuesAndExitsBulletList() throws {
+        let firstLine = "- First"
+        let continueEdit = try XCTUnwrap(
+            ComposerListEditing.returnEdit(
+                in: firstLine,
+                selectedRange: NSRange(location: (firstLine as NSString).length, length: 0)
+            )
+        )
+        let continued = (firstLine as NSString).replacingCharacters(
+            in: continueEdit.range,
+            with: continueEdit.replacement
+        )
+
+        XCTAssertEqual(continued, "- First\n- ")
+
+        let exitEdit = try XCTUnwrap(
+            ComposerListEditing.returnEdit(
+                in: continued,
+                selectedRange: NSRange(location: (continued as NSString).length, length: 0)
+            )
+        )
+        XCTAssertEqual(
+            (continued as NSString).replacingCharacters(
+                in: exitEdit.range,
+                with: exitEdit.replacement
+            ),
+            "- First\n\n"
+        )
+    }
+
+    func testComposerTabCreatesAlphabeticNestedOrderedItemsAndReturnOutdents() throws {
+        let topLevel = "1. Parent\n2. "
+        let indentEdit = try XCTUnwrap(
+            ComposerListEditing.indentationEdit(
+                in: topLevel,
+                selectedRange: NSRange(location: (topLevel as NSString).length, length: 0),
+                direction: .deeper
+            )
+        )
+        let indented = (topLevel as NSString).replacingCharacters(
+            in: indentEdit.range,
+            with: indentEdit.replacement
+        )
+        XCTAssertEqual(indented, "1. Parent\n  1. ")
+        XCTAssertEqual(
+            NoteListSyntaxParser.displayMarkers(
+                for: NoteListSyntaxParser.sourceItems(in: indented).map(\.item)
+            ),
+            ["1.", "a."]
+        )
+
+        let firstChild = indented + "Child"
+        let continueEdit = try XCTUnwrap(
+            ComposerListEditing.returnEdit(
+                in: firstChild,
+                selectedRange: NSRange(location: (firstChild as NSString).length, length: 0)
+            )
+        )
+        let nextChild = (firstChild as NSString).replacingCharacters(
+            in: continueEdit.range,
+            with: continueEdit.replacement
+        )
+        XCTAssertEqual(nextChild, "1. Parent\n  1. Child\n  2. ")
+
+        let outdentEdit = try XCTUnwrap(
+            ComposerListEditing.returnEdit(
+                in: nextChild,
+                selectedRange: NSRange(location: (nextChild as NSString).length, length: 0)
+            )
+        )
+        XCTAssertEqual(
+            (nextChild as NSString).replacingCharacters(
+                in: outdentEdit.range,
+                with: outdentEdit.replacement
+            ),
+            "1. Parent\n  1. Child\n2. "
+        )
+    }
+
+    func testComposerListSyntaxExcludesFencedCode() {
+        let body = "- Visible\n```\n- literal\n```"
+        let fencedRanges = ComposerCodeSyntaxParser.regions(in: body).compactMap { region in
+            guard case .fenced = region.kind else { return nil }
+            return region.range
+        }
+
+        XCTAssertEqual(
+            NoteListSyntaxParser.sourceItems(in: body, excluding: fencedRanges).map(\.item),
+            [
+                NoteBodyListItem(
+                    kind: .unordered,
+                    depth: 0,
+                    content: "Visible",
+                    sourceMarker: "-"
+                )
+            ]
+        )
+    }
+
+    @MainActor
+    func testComposerMarkupHighlighterAppliesLiveListStyles() throws {
+        let textView = NSTextView()
+        textView.string = "- First\n  - Second"
+
+        ComposerMarkupHighlighter.apply(to: textView)
+
+        let source = textView.string as NSString
+        let firstMarker = source.range(of: "- ").location
+        let firstContent = source.range(of: "First").location
+        let secondContent = source.range(of: "Second").location
+        XCTAssertEqual(
+            textView.textStorage?.attribute(
+                .foregroundColor,
+                at: firstMarker,
+                effectiveRange: nil
+            ) as? NSColor,
+            .clear
+        )
+        XCTAssertEqual(
+            (textView.textStorage?.attribute(
+                .paragraphStyle,
+                at: firstContent,
+                effectiveRange: nil
+            ) as? NSParagraphStyle)?.headIndent,
+            28
+        )
+        XCTAssertEqual(
+            (textView.textStorage?.attribute(
+                .paragraphStyle,
+                at: secondContent,
+                effectiveRange: nil
+            ) as? NSParagraphStyle)?.headIndent,
+            48
+        )
+    }
+
+    @MainActor
+    func testComposerMarkupHighlighterKeepsSameLineFenceContentVisibleAndSelected() throws {
+        let emptyCodeTextView = NSTextView()
+        emptyCodeTextView.string = "```"
+        emptyCodeTextView.setSelectedRange(NSRange(location: 3, length: 0))
+
+        ComposerMarkupHighlighter.apply(to: emptyCodeTextView)
+
+        XCTAssertEqual(
+            emptyCodeTextView.typingAttributes[.foregroundColor] as? NSColor,
+            .textColor
+        )
+        XCTAssertGreaterThan(
+            try XCTUnwrap(emptyCodeTextView.typingAttributes[.font] as? NSFont).pointSize,
+            1
+        )
+
+        let textView = NSTextView()
+        textView.string = "```hello"
+        textView.setSelectedRange(NSRange(location: 8, length: 0))
+
+        ComposerMarkupHighlighter.apply(to: textView)
+
+        let markerAttributes = try XCTUnwrap(textView.textStorage?.attributes(
+            at: 0,
+            effectiveRange: nil
+        ))
+        let contentAttributes = try XCTUnwrap(textView.textStorage?.attributes(
+            at: 3,
+            effectiveRange: nil
+        ))
+        XCTAssertEqual(markerAttributes[.foregroundColor] as? NSColor, .clear)
+        XCTAssertEqual(contentAttributes[.foregroundColor] as? NSColor, .textColor)
+        XCTAssertGreaterThan(try XCTUnwrap(contentAttributes[.font] as? NSFont).pointSize, 1)
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 8, length: 0))
     }
 
     @MainActor
@@ -292,6 +624,23 @@ final class LinkPreviewTests: XCTestCase {
         )
         XCTAssertEqual(links[0].requestKey, "https://example.com/page?q=One")
         XCTAssertEqual(body, "Keep HTTPS://Example.COM:443/a/../page?q=One#section exactly. Not ftp://example.com.")
+    }
+
+    func testDetectionSkipsLocalhostAndLoopbackURLs() {
+        let body = [
+            "http://localhost:3000/path",
+            "https://LOCALHOST./",
+            "http://api.localhost/resource",
+            "http://127.99.4.2:8080",
+            "http://127.1:8080",
+            "http://[::1]/",
+            "https://example.com/public"
+        ].joined(separator: "\n")
+
+        XCTAssertEqual(
+            LinkDetector().links(in: body).map(\.requestKey),
+            ["https://example.com/public"]
+        )
     }
 
     func testAddressPolicyRejectsPrivateReservedMappedAndTransitionAddresses() {
@@ -511,6 +860,36 @@ final class LinkPreviewTests: XCTestCase {
             detectedLinks: LinkDetector().links(in: snapshot.body)
         )
         XCTAssertEqual(try fixture.database.fetchNote(id: note.id).linkPreviews.first?.status, .pending)
+    }
+
+    func testReconciliationRemovesExistingPreviewWhenURLChangesToLocalhost() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanUp() }
+        let note = try fixture.database.createNote(body: "https://example.net/public")
+        var snapshot = try XCTUnwrap(
+            fixture.database.fetchLinkReconciliationSnapshot(noteID: note.id)
+        )
+        _ = try fixture.database.reconcileLinkPreviews(
+            snapshot: snapshot,
+            detectedLinks: LinkDetector().links(in: snapshot.body)
+        )
+        XCTAssertEqual(try fixture.database.fetchNote(id: note.id).linkPreviews.count, 1)
+
+        _ = try fixture.database.editNote(id: note.id, body: "http://localhost:3000/private")
+        snapshot = try XCTUnwrap(
+            fixture.database.fetchLinkReconciliationSnapshot(noteID: note.id)
+        )
+        let result = try fixture.database.reconcileLinkPreviews(
+            snapshot: snapshot,
+            detectedLinks: LinkDetector().links(in: snapshot.body)
+        )
+
+        XCTAssertTrue(result.wasApplied)
+        XCTAssertTrue(try fixture.database.fetchNote(id: note.id).linkPreviews.isEmpty)
+        XCTAssertTrue(try fixture.database.fetchLinkPreviewWork(
+            fetchBefore: Date(),
+            excludingRequestKeys: []
+        ).isEmpty)
     }
 
     func testBodyEditTransactionMakesPersistedAssociationsIneligibleAcrossRelaunch() async throws {

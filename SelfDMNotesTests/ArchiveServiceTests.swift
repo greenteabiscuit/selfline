@@ -172,6 +172,8 @@ final class ArchiveServiceTests: XCTestCase {
         var legacyNotes = try XCTUnwrap(legacyObject["notes"] as? [[String: Any]])
         for index in legacyNotes.indices {
             legacyNotes[index].removeValue(forKey: "threadRootID")
+            legacyNotes[index].removeValue(forKey: "reminderAtMilliseconds")
+            legacyNotes[index].removeValue(forKey: "reminderCompletedAtMilliseconds")
         }
         legacyObject["notes"] = legacyNotes
         let legacyData = try JSONSerialization.data(
@@ -198,15 +200,47 @@ final class ArchiveServiceTests: XCTestCase {
         let validatedLegacy = try fixture.service.validatePortableExport(at: exportURL)
         XCTAssertEqual(validatedLegacy.notes.map(\.id), [root.id, reply.id])
         XCTAssertTrue(validatedLegacy.notes.allSatisfy { $0.threadRootID == nil })
+        XCTAssertTrue(validatedLegacy.notes.allSatisfy { $0.reminderAtMilliseconds == nil })
+        XCTAssertTrue(validatedLegacy.notes.allSatisfy { $0.reminderCompletedAtMilliseconds == nil })
+    }
+
+    func testPortableExportPreservesPendingAndCompletedReminderMetadata() throws {
+        let fixture = try ArchiveFixture.make()
+        defer { fixture.cleanUp() }
+        let root = try fixture.database.createNote(body: "Pending reminder")
+        let reply = try fixture.database.createReply(rootID: root.id, body: "Completed reminder")
+        let rootReminder = Date(timeIntervalSince1970: 1_800_000_000)
+        let replyReminder = Date(timeIntervalSince1970: 1_800_000_100)
+        let completedAt = Date(timeIntervalSince1970: 1_800_000_200)
+        _ = try fixture.database.setReminder(id: root.id, at: rootReminder)
+        _ = try fixture.database.setReminder(id: reply.id, at: replyReminder)
+        _ = try fixture.database.markReminderDone(id: reply.id, completedAt: completedAt)
+
+        let exportURL = try fixture.service.exportPortableArchive(in: fixture.exportDirectory)
+        let portable = try fixture.service.validatePortableExport(at: exportURL)
+        let exportedRoot = try XCTUnwrap(portable.notes.first { $0.id == root.id })
+        let exportedReply = try XCTUnwrap(portable.notes.first { $0.id == reply.id })
+        XCTAssertEqual(exportedRoot.reminderAtMilliseconds, 1_800_000_000_000)
+        XCTAssertNil(exportedRoot.reminderCompletedAtMilliseconds)
+        XCTAssertEqual(exportedReply.reminderAtMilliseconds, 1_800_000_100_000)
+        XCTAssertEqual(exportedReply.reminderCompletedAtMilliseconds, 1_800_000_200_000)
+
+        let markdown = try String(
+            contentsOf: exportURL.appendingPathComponent("notes.md"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(markdown.contains("- Reminder:"))
+        XCTAssertTrue(markdown.contains("- Reminder completed:"))
     }
 
     func testV5BackupValidatesStagesAndMigratesOnTrialOpen() throws {
         let fixture = try ArchiveFixture.make()
         defer { fixture.cleanUp() }
         let noteID = UUID()
-        let packageURL = try makeV5BackupPackage(
+        let packageURL = try makeLegacyBackupPackage(
             in: fixture.backupDirectory,
-            noteID: noteID
+            noteID: noteID,
+            schemaVersion: 5
         )
 
         let validated = try fixture.service.validateBackup(at: packageURL)
@@ -227,6 +261,40 @@ final class ArchiveServiceTests: XCTestCase {
         XCTAssertEqual(try migrated.fetchNote(id: noteID).body, "Real v5 backup")
         let contents = try migrated.inspectArchiveContents(includePortableNotes: false)
         XCTAssertEqual(contents.migrations, DatabaseMigrations.identifiers)
+        try trial.confirmSuccessfulStartup()
+        try migrated.close()
+    }
+
+    func testV6BackupValidatesStagesAndMigratesReminderSchemaOnTrialOpen() throws {
+        let fixture = try ArchiveFixture.make()
+        defer { fixture.cleanUp() }
+        let noteID = UUID()
+        let packageURL = try makeLegacyBackupPackage(
+            in: fixture.backupDirectory,
+            noteID: noteID,
+            schemaVersion: 6
+        )
+
+        let validated = try fixture.service.validateBackup(at: packageURL)
+        XCTAssertEqual(validated.manifest.databaseSchemaVersion, 6)
+        XCTAssertEqual(
+            validated.manifest.databaseMigrations,
+            Array(DatabaseMigrations.identifiers.prefix(6))
+        )
+
+        _ = try fixture.service.stageRestore(from: packageURL)
+        try fixture.database.close()
+        let trial = RestoreRecoveryCoordinator(provider: fixture.provider)
+        XCTAssertEqual(try trial.resolveBeforeOpeningLibrary(), .trial)
+        let migrated = try AppDatabase(databaseURL: fixture.provider.databaseURL)
+        let restored = try migrated.fetchNote(id: noteID)
+        XCTAssertEqual(restored.body, "Real v6 backup")
+        XCTAssertNil(restored.reminderAt)
+        XCTAssertNil(restored.reminderCompletedAt)
+        XCTAssertEqual(
+            try migrated.inspectArchiveContents(includePortableNotes: false).migrations,
+            DatabaseMigrations.identifiers
+        )
         try trial.confirmSuccessfulStartup()
         try migrated.close()
     }
@@ -611,9 +679,13 @@ final class ArchiveServiceTests: XCTestCase {
         try encoder.encode(rewritten).write(to: manifestURL)
     }
 
-    private func makeV5BackupPackage(in directory: URL, noteID: UUID) throws -> URL {
+    private func makeLegacyBackupPackage(
+        in directory: URL,
+        noteID: UUID,
+        schemaVersion: Int
+    ) throws -> URL {
         let packageURL = directory.appendingPathComponent(
-            "real-v5.selfdmbackup",
+            "real-v\(schemaVersion).selfdmbackup",
             isDirectory: true
         )
         let libraryURL = packageURL.appendingPathComponent("library", isDirectory: true)
@@ -625,12 +697,12 @@ final class ArchiveServiceTests: XCTestCase {
         let queue = try DatabaseQueue(path: databaseURL.path)
         try DatabaseMigrations.makeMigrator().migrate(
             queue,
-            upTo: DatabaseMigrations.identifiers[4]
+            upTo: DatabaseMigrations.identifiers[schemaVersion - 1]
         )
         try queue.write { database in
             try database.execute(
                 sql: "INSERT INTO notes (id, body, createdAt) VALUES (?, ?, ?)",
-                arguments: [noteID.uuidString, "Real v5 backup", 1_700_000_000_000]
+                arguments: [noteID.uuidString, "Real v\(schemaVersion) backup", 1_700_000_000_000]
             )
         }
         try queue.close()
@@ -644,8 +716,8 @@ final class ArchiveServiceTests: XCTestCase {
             createdAtMilliseconds: 1_700_000_000_000,
             applicationVersion: "legacy-test",
             buildVersion: "legacy-test",
-            databaseSchemaVersion: 5,
-            databaseMigrations: Array(DatabaseMigrations.identifiers.prefix(5)),
+            databaseSchemaVersion: schemaVersion,
+            databaseMigrations: Array(DatabaseMigrations.identifiers.prefix(schemaVersion)),
             files: [
                 ArchiveFileRecord(
                     path: "library/notes.sqlite",

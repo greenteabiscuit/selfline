@@ -78,11 +78,36 @@ enum LinkPreviewURLNormalizer {
 
     static func detectedLink(originalURL: String, url: URL) throws -> DetectedLink {
         let normalized = try normalize(url)
+        guard isUnfurlEligible(normalized) else {
+            throw LinkPreviewNetworkError.unsafeDestination
+        }
         return DetectedLink(
             originalURL: originalURL,
             requestKey: normalized.absoluteString,
             url: normalized
         )
+    }
+
+    private static func isUnfurlEligible(_ url: URL) -> Bool {
+        guard let host = url.host(percentEncoded: false)?.lowercased() else {
+            return false
+        }
+        if host == "localhost" || host.hasSuffix(".localhost") {
+            return false
+        }
+
+        var ipv4 = in_addr()
+        if inet_aton(host, &ipv4) == 1 {
+            return withUnsafeBytes(of: &ipv4) { $0.first != 127 }
+        }
+
+        var ipv6 = in6_addr()
+        if inet_pton(AF_INET6, host, &ipv6) == 1 {
+            return withUnsafeBytes(of: &ipv6) { bytes in
+                !bytes.dropLast().allSatisfy({ $0 == 0 }) || bytes.last != 1
+            }
+        }
+        return true
     }
 
     private static func canonicalIPAddress(_ host: String) -> String? {

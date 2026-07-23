@@ -5,6 +5,7 @@ enum NoteBodyBlock: Equatable {
     case prose(String)
     case quote(String)
     case code(language: String?, text: String)
+    case list([NoteBodyListItem])
 }
 
 enum NoteBodyInlineSegment: Equatable {
@@ -14,7 +15,7 @@ enum NoteBodyInlineSegment: Equatable {
 
 enum NoteBodyMarkupParser {
     private struct FenceOpening {
-        let language: String?
+        let content: String
     }
 
     static func blocks(in text: String) -> [NoteBodyBlock] {
@@ -32,18 +33,23 @@ enum NoteBodyMarkupParser {
         }
 
         while lineIndex < lines.count {
-            if let opening = openingFence(in: lines[lineIndex]),
-               let closingIndex = lines[(lineIndex + 1)...].firstIndex(
-                where: isClosingFence
-               ) {
+            if let opening = openingFence(in: lines[lineIndex]) {
                 appendProse()
+                let closingIndex = lines[(lineIndex + 1)...].firstIndex(
+                    where: isClosingFence
+                )
+                let contentEnd = closingIndex ?? lines.endIndex
+                var codeLines = Array(lines[(lineIndex + 1)..<contentEnd])
+                if !opening.content.isEmpty {
+                    codeLines.insert(opening.content, at: 0)
+                }
                 blocks.append(
                     .code(
-                        language: opening.language,
-                        text: lines[(lineIndex + 1)..<closingIndex].joined(separator: "\n")
+                        language: nil,
+                        text: codeLines.joined(separator: "\n")
                     )
                 )
-                lineIndex = closingIndex + 1
+                lineIndex = closingIndex.map { $0 + 1 } ?? lines.endIndex
                 continue
             }
 
@@ -56,6 +62,15 @@ enum NoteBodyMarkupParser {
                     lineIndex += 1
                 }
                 blocks.append(.quote(quoteLines.joined(separator: "\n")))
+            } else if NoteListSyntaxParser.item(in: lines[lineIndex]) != nil {
+                appendProse()
+                var items: [NoteBodyListItem] = []
+                while lineIndex < lines.count,
+                      let item = NoteListSyntaxParser.item(in: lines[lineIndex]) {
+                    items.append(item)
+                    lineIndex += 1
+                }
+                blocks.append(.list(items))
             } else {
                 proseLines.append(lines[lineIndex])
                 lineIndex += 1
@@ -98,13 +113,14 @@ enum NoteBodyMarkupParser {
     }
 
     private static func openingFence(in line: String) -> FenceOpening? {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard trimmed.hasPrefix("```"),
-              !trimmed.dropFirst(3).contains("`") else {
+        guard let markerStart = line.firstIndex(where: { !$0.isWhitespace }) else {
             return nil
         }
-        let language = trimmed.dropFirst(3).trimmingCharacters(in: .whitespaces)
-        return FenceOpening(language: language.isEmpty ? nil : language)
+        let fenceAndContent = line[markerStart...]
+        guard fenceAndContent.hasPrefix("```") else {
+            return nil
+        }
+        return FenceOpening(content: String(fenceAndContent.dropFirst(3)))
     }
 
     private static func isClosingFence(_ line: String) -> Bool {
@@ -218,6 +234,8 @@ struct LinkedNoteBodyText: View {
                     NoteQuoteBlock(text: quote)
                 case let .code(language, code):
                     NoteCodeBlock(text: code, language: language)
+                case let .list(items):
+                    NoteListBlock(items: items)
                 }
             }
         }
@@ -231,6 +249,8 @@ struct LinkedNoteBodyText: View {
                 switch block {
                 case let .prose(prose), let .quote(prose):
                     linkableText = prose
+                case let .list(items):
+                    linkableText = items.map(\.content).joined(separator: "\n")
                 case .code:
                     return false
                 }
@@ -241,6 +261,43 @@ struct LinkedNoteBodyText: View {
                 ? "HTTP and HTTPS links open in the default browser."
                 : ""
         )
+    }
+}
+
+private struct NoteListBlock: View {
+    let items: [NoteBodyListItem]
+
+    var body: some View {
+        let markers = NoteListSyntaxParser.displayMarkers(for: items)
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(items.indices, id: \.self) { index in
+                let item = items[index]
+                let marker = markers[index]
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(marker)
+                        .frame(width: 24, alignment: .trailing)
+                        .accessibilityHidden(true)
+                    Text(NoteBodyLinkFormatter.attributedString(for: item.content))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.leading, CGFloat(item.depth) * 20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(
+                    item.kind == .ordered ? "List item \(marker)" : "Bullet item"
+                )
+                .accessibilityValue(item.content)
+                .accessibilityHint(
+                    NoteBodyLinkFormatter.attributedString(for: item.content).runs.contains {
+                        $0.link != nil
+                    }
+                        ? "HTTP and HTTPS links open in the default browser."
+                        : ""
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -332,6 +389,7 @@ struct NoteRow: View {
     @ObservedObject var model: TimelineViewModel
     let copy: () -> Void
     let edit: () -> Void
+    let editReminder: () -> Void
     let moveToTrash: () -> Void
     let openThread: () -> Void
 
@@ -350,6 +408,8 @@ struct NoteRow: View {
             if note.linkPreviews.contains(where: { $0.status != .removed }) {
                 NoteLinkPreviewsView(previews: note.linkPreviews, model: model)
             }
+
+            ReminderStatusLabel(note: note, now: model.reminderClock)
 
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 if let updatedAt = note.updatedAt {
@@ -385,6 +445,22 @@ struct NoteRow: View {
                     Button("Edit", systemImage: "pencil", action: edit)
                         .disabled(!model.canMutateLibrary)
                     Divider()
+                    if note.hasPendingReminder {
+                        Button("Edit Reminder…", systemImage: "clock", action: editReminder)
+                            .disabled(!model.canMutateLibrary)
+                        Button("Mark Reminder as Done", systemImage: "checkmark") {
+                            Task { await model.markReminderDone(note) }
+                        }
+                        .disabled(!model.canMutateLibrary)
+                        Button("Remove Reminder", systemImage: "bell.slash") {
+                            Task { await model.removeReminder(note) }
+                        }
+                        .disabled(!model.canMutateLibrary)
+                    } else {
+                        Button("Set Reminder…", systemImage: "bell", action: editReminder)
+                            .disabled(!model.canMutateLibrary)
+                    }
+                    Divider()
                     Button("Move to Trash", systemImage: "trash", role: .destructive) {
                         moveToTrash()
                     }
@@ -393,12 +469,18 @@ struct NoteRow: View {
                 .menuStyle(.borderlessButton)
                 .fixedSize()
                 .accessibilityIdentifier("note-actions")
-                .accessibilityHint("Copy text, edit, or move this note and its attachments to Trash.")
+                .accessibilityHint(
+                    "Copy text, edit, manage its reminder, or move this note and its attachments to Trash."
+                )
             }
             .font(.caption)
             .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 8)
+        .padding(10)
+        .background(
+            note.isReminderDue(at: model.reminderClock) ? Color.blue.opacity(0.14) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 10)
+        )
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
     }

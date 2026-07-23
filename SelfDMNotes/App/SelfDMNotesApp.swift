@@ -20,7 +20,7 @@ struct SelfDMNotesApp: App {
                 startupRecoveryMessage: environment.startupRecoveryMessage
             )
         }
-        .defaultSize(width: 760, height: 620)
+        .defaultSize(width: 1_200, height: 800)
         .commands {
             CommandGroup(replacing: .appInfo) {
                 Button("About Self DM Notes…") {

@@ -1424,6 +1424,7 @@ private struct ThreadPanelNoteRow: View {
     let edit: () -> Void
     let editReminder: () -> Void
     let moveToTrash: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1514,10 +1515,22 @@ private struct ThreadPanelNoteRow: View {
             }
         }
         .padding(10)
-        .background(
-            note.isReminderDue(at: model.reminderClock) ? Color.blue.opacity(0.16) : Color(nsColor: .controlBackgroundColor),
-            in: RoundedRectangle(cornerRadius: 9)
-        )
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(
+                        note.isReminderDue(at: model.reminderClock)
+                            ? Color.blue.opacity(0.16)
+                            : Color(nsColor: .controlBackgroundColor)
+                    )
+                if isHovered {
+                    RoundedRectangle(cornerRadius: 9)
+                        .fill(Color(nsColor: .labelColor).opacity(0.04))
+                }
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 9))
+        .onHover { isHovered = $0 }
         .accessibilityElement(children: .contain)
     }
 }

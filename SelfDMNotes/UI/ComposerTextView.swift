@@ -336,6 +336,19 @@ enum ComposerListIndentationDirection {
 }
 
 enum ComposerListEditing {
+    static func selectionAfterClick(
+        in text: String,
+        selectedRange: NSRange
+    ) -> NSRange {
+        guard selectedRange.length == 0 else { return selectedRange }
+        guard let sourceItem = sourceItems(in: text).first(where: {
+            NSLocationInRange(selectedRange.location, $0.markerRange)
+        }) else {
+            return selectedRange
+        }
+        return NSRange(location: NSMaxRange(sourceItem.markerRange), length: 0)
+    }
+
     static func returnEdit(
         in text: String,
         selectedRange: NSRange
@@ -1027,6 +1040,17 @@ private final class SendingTextView: NSTextView {
             return
         }
         super.paste(sender)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        let adjustedSelection = ComposerListEditing.selectionAfterClick(
+            in: string,
+            selectedRange: selectedRange()
+        )
+        if adjustedSelection != selectedRange() {
+            setSelectedRange(adjustedSelection)
+        }
     }
 
     private var isPasteInsertionInQuote: Bool {

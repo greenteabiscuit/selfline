@@ -38,6 +38,34 @@ final class LinkPreviewTests: XCTestCase {
         XCTAssertTrue(LinkDetector().links(in: body).isEmpty)
     }
 
+    func testAppKitNoteBodyFormattingUsesNativeLinkAttributes() throws {
+        let body = "Open 🚀 https://example.com and `code`"
+        let attributed = NoteBodyLinkFormatter.appKitAttributedString(for: body)
+        let source = attributed.string as NSString
+        let linkLocation = source.range(of: "https://example.com").location
+        let codeLocation = source.range(of: "code").location
+
+        XCTAssertEqual(
+            attributed.attribute(.link, at: linkLocation, effectiveRange: nil) as? URL,
+            try XCTUnwrap(URL(string: "https://example.com"))
+        )
+        XCTAssertEqual(
+            attributed.attribute(.foregroundColor, at: linkLocation, effectiveRange: nil)
+                as? NSColor,
+            .linkColor
+        )
+        XCTAssertEqual(
+            attributed.attribute(.underlineStyle, at: linkLocation, effectiveRange: nil)
+                as? Int,
+            NSUnderlineStyle.single.rawValue
+        )
+        XCTAssertTrue(
+            try XCTUnwrap(
+                attributed.attribute(.font, at: codeLocation, effectiveRange: nil) as? NSFont
+            ).isFixedPitch
+        )
+    }
+
     func testNoteBodyMarkupParsesInlineCodeAndLeavesUnclosedDelimiterLiteral() {
         XCTAssertEqual(
             NoteBodyMarkupParser.inlineSegments(in: "Run `swift test` now"),
@@ -396,6 +424,37 @@ final class LinkPreviewTests: XCTestCase {
                 with: exitEdit.replacement
             ),
             "- First\n\n"
+        )
+    }
+
+    func testComposerClickOnHiddenListMarkerMovesInsertionToContentStart() {
+        let body = "1. hello world\n2. bye!"
+        let adjustedSelection = ComposerListEditing.selectionAfterClick(
+            in: body,
+            selectedRange: NSRange(location: 0, length: 0)
+        )
+
+        XCTAssertEqual(adjustedSelection, NSRange(location: 3, length: 0))
+        XCTAssertEqual(
+            (body as NSString).replacingCharacters(
+                in: adjustedSelection,
+                with: "Foo, "
+            ),
+            "1. Foo, hello world\n2. bye!"
+        )
+        XCTAssertEqual(
+            ComposerListEditing.selectionAfterClick(
+                in: body,
+                selectedRange: NSRange(location: 3, length: 0)
+            ),
+            NSRange(location: 3, length: 0)
+        )
+        XCTAssertEqual(
+            ComposerListEditing.selectionAfterClick(
+                in: body,
+                selectedRange: NSRange(location: 0, length: 4)
+            ),
+            NSRange(location: 0, length: 4)
         )
     }
 

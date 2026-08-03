@@ -176,6 +176,45 @@ enum NoteBodyLinkFormatter {
         return attributed
     }
 
+    static func appKitAttributedString(for text: String) -> NSAttributedString {
+        let attributed = attributedString(for: text)
+        let bodyFont = NSFont.preferredFont(forTextStyle: .body)
+        let renderedText = NSMutableAttributedString(
+            string: String(attributed.characters),
+            attributes: [
+                .font: bodyFont,
+                .foregroundColor: NSColor.labelColor
+            ]
+        )
+        for run in attributed.runs {
+            let range = NSRange(run.range, in: attributed)
+            if let link = run.link {
+                renderedText.addAttributes(
+                    [
+                        .link: link,
+                        .foregroundColor: NSColor.linkColor,
+                        .underlineStyle: NSUnderlineStyle.single.rawValue
+                    ],
+                    range: range
+                )
+            }
+            if run.backgroundColor != nil {
+                renderedText.addAttributes(
+                    [
+                        .font: NSFont.monospacedSystemFont(
+                            ofSize: bodyFont.pointSize,
+                            weight: .regular
+                        ),
+                        .foregroundColor: NSColor.systemRed,
+                        .backgroundColor: NSColor.controlBackgroundColor
+                    ],
+                    range: range
+                )
+            }
+        }
+        return renderedText
+    }
+
     private static func linkedAttributedString(for text: String) -> AttributedString {
         var attributed = AttributedString(text)
         guard let detector = try? NSDataDetector(
@@ -218,6 +257,64 @@ enum NoteBodyLinkFormatter {
     }
 }
 
+private struct SelectableLinkedText: NSViewRepresentable {
+    let attributedText: NSAttributedString
+
+    func makeNSView(context: Context) -> NSTextView {
+        let textView = NSTextView()
+        textView.drawsBackground = false
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.importsGraphics = false
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineBreakMode = .byWordWrapping
+        textView.linkTextAttributes = [
+            .cursor: NSCursor.pointingHand,
+            .foregroundColor: NSColor.linkColor,
+            .underlineStyle: NSUnderlineStyle.single.rawValue
+        ]
+        textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return textView
+    }
+
+    func updateNSView(_ textView: NSTextView, context: Context) {
+        if !textView.attributedString().isEqual(to: attributedText) {
+            textView.textStorage?.setAttributedString(attributedText)
+        }
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        nsView textView: NSTextView,
+        context: Context
+    ) -> CGSize? {
+        guard let textContainer = textView.textContainer,
+              let layoutManager = textView.layoutManager else {
+            return nil
+        }
+        let proposedWidth = proposal.width.flatMap { width in
+            width.isFinite && width > 0 ? width : nil
+        }
+        let layoutWidth = proposedWidth ?? .greatestFiniteMagnitude
+        textView.frame.size.width = layoutWidth
+        textContainer.containerSize = NSSize(
+            width: layoutWidth,
+            height: .greatestFiniteMagnitude
+        )
+        layoutManager.ensureLayout(for: textContainer)
+        let usedSize = layoutManager.usedRect(for: textContainer).size
+        return CGSize(
+            width: proposedWidth ?? ceil(usedSize.width),
+            height: max(ceil(usedSize.height), NSFont.preferredFont(forTextStyle: .body).pointSize)
+        )
+    }
+}
+
 struct LinkedNoteBodyText: View {
     let text: String
     let accessibilityLabel: String
@@ -228,8 +325,9 @@ struct LinkedNoteBodyText: View {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
                 case let .prose(prose):
-                    Text(NoteBodyLinkFormatter.attributedString(for: prose))
-                        .textSelection(.enabled)
+                    SelectableLinkedText(
+                        attributedText: NoteBodyLinkFormatter.appKitAttributedString(for: prose)
+                    )
                 case let .quote(quote):
                     NoteQuoteBlock(text: quote)
                 case let .code(language, code):
@@ -277,8 +375,9 @@ private struct NoteListBlock: View {
                     Text(marker)
                         .frame(width: 24, alignment: .trailing)
                         .accessibilityHidden(true)
-                    Text(NoteBodyLinkFormatter.attributedString(for: item.content))
-                        .textSelection(.enabled)
+                    SelectableLinkedText(
+                        attributedText: NoteBodyLinkFormatter.appKitAttributedString(for: item.content)
+                    )
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.leading, CGFloat(item.depth) * 20)
@@ -310,8 +409,11 @@ private struct NoteQuoteBlock: View {
                 .fill(Color(nsColor: .separatorColor))
                 .frame(width: 3)
                 .accessibilityHidden(true)
-            Text(NoteBodyLinkFormatter.attributedString(for: text.isEmpty ? " " : text))
-                .textSelection(.enabled)
+            SelectableLinkedText(
+                attributedText: NoteBodyLinkFormatter.appKitAttributedString(
+                    for: text.isEmpty ? " " : text
+                )
+            )
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 4)
@@ -392,6 +494,7 @@ struct NoteRow: View {
     let editReminder: () -> Void
     let moveToTrash: () -> Void
     let openThread: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -477,11 +580,23 @@ struct NoteRow: View {
             .foregroundStyle(.secondary)
         }
         .padding(10)
-        .background(
-            note.isReminderDue(at: model.reminderClock) ? Color.blue.opacity(0.14) : Color.clear,
-            in: RoundedRectangle(cornerRadius: 10)
-        )
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(
+                        note.isReminderDue(at: model.reminderClock)
+                            ? Color.blue.opacity(0.14)
+                            : Color.clear
+                    )
+                if isHovered {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color(nsColor: .labelColor).opacity(0.04))
+                }
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 10))
+        .onHover { isHovered = $0 }
         .accessibilityElement(children: .contain)
     }
 }

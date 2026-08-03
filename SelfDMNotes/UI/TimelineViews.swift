@@ -371,7 +371,7 @@ private struct NoteListBlock: View {
             ForEach(items.indices, id: \.self) { index in
                 let item = items[index]
                 let marker = markers[index]
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                HStack(alignment: .top, spacing: 8) {
                     Text(marker)
                         .frame(width: 24, alignment: .trailing)
                         .accessibilityHidden(true)

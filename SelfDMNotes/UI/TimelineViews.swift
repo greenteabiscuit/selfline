@@ -498,10 +498,48 @@ struct NoteRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if !note.body.isEmpty {
-                LinkedNoteBodyText(text: note.body, accessibilityLabel: "Note text")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("note-body")
+            HStack(alignment: .top, spacing: 8) {
+                if !note.body.isEmpty {
+                    LinkedNoteBodyText(text: note.body, accessibilityLabel: "Note text")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("note-body")
+                } else {
+                    Spacer(minLength: 0)
+                }
+                Menu("Note actions", systemImage: "ellipsis") {
+                    if !note.body.isEmpty {
+                        Button("Copy Text", systemImage: "doc.on.doc", action: copy)
+                    }
+                    Button("Edit", systemImage: "pencil", action: edit)
+                        .disabled(!model.canMutateLibrary)
+                    Divider()
+                    if note.hasPendingReminder {
+                        Button("Edit Reminder…", systemImage: "clock", action: editReminder)
+                            .disabled(!model.canMutateLibrary)
+                        Button("Mark Reminder as Done", systemImage: "checkmark") {
+                            Task { await model.markReminderDone(note) }
+                        }
+                        .disabled(!model.canMutateLibrary)
+                        Button("Remove Reminder", systemImage: "bell.slash") {
+                            Task { await model.removeReminder(note) }
+                        }
+                        .disabled(!model.canMutateLibrary)
+                    } else {
+                        Button("Set Reminder…", systemImage: "bell", action: editReminder)
+                            .disabled(!model.canMutateLibrary)
+                    }
+                    Divider()
+                    Button("Move to Trash", systemImage: "trash", role: .destructive) {
+                        moveToTrash()
+                    }
+                    .disabled(!model.canMutateLibrary)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .accessibilityIdentifier("note-actions")
+                .accessibilityHint(
+                    "Copy text, edit, manage its reminder, or move this note and its attachments to Trash."
+                )
             }
 
             if !note.attachments.isEmpty {
@@ -541,40 +579,6 @@ struct NoteRow: View {
                         )
                 }
                 Spacer()
-                Menu("Note actions", systemImage: "ellipsis") {
-                    if !note.body.isEmpty {
-                        Button("Copy Text", systemImage: "doc.on.doc", action: copy)
-                    }
-                    Button("Edit", systemImage: "pencil", action: edit)
-                        .disabled(!model.canMutateLibrary)
-                    Divider()
-                    if note.hasPendingReminder {
-                        Button("Edit Reminder…", systemImage: "clock", action: editReminder)
-                            .disabled(!model.canMutateLibrary)
-                        Button("Mark Reminder as Done", systemImage: "checkmark") {
-                            Task { await model.markReminderDone(note) }
-                        }
-                        .disabled(!model.canMutateLibrary)
-                        Button("Remove Reminder", systemImage: "bell.slash") {
-                            Task { await model.removeReminder(note) }
-                        }
-                        .disabled(!model.canMutateLibrary)
-                    } else {
-                        Button("Set Reminder…", systemImage: "bell", action: editReminder)
-                            .disabled(!model.canMutateLibrary)
-                    }
-                    Divider()
-                    Button("Move to Trash", systemImage: "trash", role: .destructive) {
-                        moveToTrash()
-                    }
-                    .disabled(!model.canMutateLibrary)
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .accessibilityIdentifier("note-actions")
-                .accessibilityHint(
-                    "Copy text, edit, manage its reminder, or move this note and its attachments to Trash."
-                )
             }
             .font(.caption)
             .foregroundStyle(.secondary)

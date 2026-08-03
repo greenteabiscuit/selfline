@@ -1444,35 +1444,6 @@ private struct ThreadPanelNoteRow: View {
                     .accessibilityLabel(
                         "Created \(note.createdAt.formatted(date: .complete, time: .complete))"
                     )
-            }
-
-            if !note.body.isEmpty {
-                LinkedNoteBodyText(
-                    text: note.body,
-                    accessibilityLabel: note.isReply ? "Reply text" : "Root note text"
-                )
-            }
-
-            if !note.attachments.isEmpty {
-                NoteAttachmentsView(attachments: note.attachments, model: model)
-            }
-
-            if note.linkPreviews.contains(where: { $0.status != .removed }) {
-                NoteLinkPreviewsView(previews: note.linkPreviews, model: model)
-            }
-
-            ReminderStatusLabel(note: note, now: model.reminderClock)
-
-            HStack {
-                if let updatedAt = note.updatedAt {
-                    Text("Edited")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .accessibilityLabel(
-                            "Edited \(updatedAt.formatted(date: .complete, time: .complete))"
-                        )
-                }
-                Spacer()
                 Menu("Note actions", systemImage: "ellipsis") {
                     if !note.body.isEmpty {
                         Button("Copy Text", systemImage: "doc.on.doc", action: copy)
@@ -1512,6 +1483,35 @@ private struct ThreadPanelNoteRow: View {
                         ? "Copy text, edit, manage its reminder, or move this reply to Trash."
                         : "Copy text, edit, manage its reminder, or move this root and its active replies to Trash."
                 )
+            }
+
+            if !note.body.isEmpty {
+                LinkedNoteBodyText(
+                    text: note.body,
+                    accessibilityLabel: note.isReply ? "Reply text" : "Root note text"
+                )
+            }
+
+            if !note.attachments.isEmpty {
+                NoteAttachmentsView(attachments: note.attachments, model: model)
+            }
+
+            if note.linkPreviews.contains(where: { $0.status != .removed }) {
+                NoteLinkPreviewsView(previews: note.linkPreviews, model: model)
+            }
+
+            ReminderStatusLabel(note: note, now: model.reminderClock)
+
+            HStack {
+                if let updatedAt = note.updatedAt {
+                    Text("Edited")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel(
+                            "Edited \(updatedAt.formatted(date: .complete, time: .complete))"
+                        )
+                }
+                Spacer()
             }
         }
         .padding(10)

@@ -427,9 +427,9 @@ final class LinkPreviewTests: XCTestCase {
         )
     }
 
-    func testComposerClickOnHiddenListMarkerMovesInsertionToContentStart() {
+    func testComposerNavigationIntoHiddenListMarkerMovesInsertionToContentStart() {
         let body = "1. hello world\n2. bye!"
-        let adjustedSelection = ComposerListEditing.selectionAfterClick(
+        let adjustedSelection = ComposerListEditing.selectionOutsideHiddenMarker(
             in: body,
             selectedRange: NSRange(location: 0, length: 0)
         )
@@ -443,18 +443,36 @@ final class LinkPreviewTests: XCTestCase {
             "1. Foo, hello world\n2. bye!"
         )
         XCTAssertEqual(
-            ComposerListEditing.selectionAfterClick(
+            ComposerListEditing.selectionOutsideHiddenMarker(
                 in: body,
                 selectedRange: NSRange(location: 3, length: 0)
             ),
             NSRange(location: 3, length: 0)
         )
         XCTAssertEqual(
-            ComposerListEditing.selectionAfterClick(
+            ComposerListEditing.selectionOutsideHiddenMarker(
                 in: body,
                 selectedRange: NSRange(location: 0, length: 4)
             ),
             NSRange(location: 0, length: 4)
+        )
+
+        let secondLineStart = (body as NSString).range(of: "2. bye!").location
+        XCTAssertEqual(
+            ComposerListEditing.selectionOutsideHiddenMarker(
+                in: body,
+                selectedRange: NSRange(location: secondLineStart, length: 0)
+            ),
+            NSRange(location: secondLineStart + 3, length: 0)
+        )
+
+        let bulletedBody = "- hello world\n- bye!"
+        XCTAssertEqual(
+            ComposerListEditing.selectionOutsideHiddenMarker(
+                in: bulletedBody,
+                selectedRange: NSRange(location: 0, length: 0)
+            ),
+            NSRange(location: 2, length: 0)
         )
     }
 

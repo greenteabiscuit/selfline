@@ -336,7 +336,7 @@ enum ComposerListIndentationDirection {
 }
 
 enum ComposerListEditing {
-    static func selectionAfterClick(
+    static func selectionOutsideHiddenMarker(
         in text: String,
         selectedRange: NSRange
     ) -> NSRange {
@@ -1044,7 +1044,16 @@ private final class SendingTextView: NSTextView {
 
     override func mouseDown(with event: NSEvent) {
         super.mouseDown(with: event)
-        let adjustedSelection = ComposerListEditing.selectionAfterClick(
+        moveSelectionOutsideHiddenListMarker()
+    }
+
+    override func moveToBeginningOfParagraph(_ sender: Any?) {
+        super.moveToBeginningOfParagraph(sender)
+        moveSelectionOutsideHiddenListMarker()
+    }
+
+    private func moveSelectionOutsideHiddenListMarker() {
+        let adjustedSelection = ComposerListEditing.selectionOutsideHiddenMarker(
             in: string,
             selectedRange: selectedRange()
         )

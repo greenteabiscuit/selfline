@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -19,8 +20,11 @@ struct SelfDMNotesApp: App {
                 supportService: environment.supportService,
                 startupRecoveryMessage: environment.startupRecoveryMessage
             )
+            .background(StartupWindowMaximizer())
         }
-        .defaultSize(width: 1_200, height: 800)
+        .defaultSize(
+            NSScreen.main?.visibleFrame.size ?? CGSize(width: 1_200, height: 800)
+        )
         .commands {
             CommandGroup(replacing: .appInfo) {
                 Button("About Self DM Notes…") {
@@ -64,6 +68,31 @@ struct SelfDMNotesApp: App {
                     NotificationCenter.default.post(name: .showAboutAndSupport, object: nil)
                 }
             }
+        }
+    }
+}
+
+private struct StartupWindowMaximizer: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        StartupWindowMaximizingView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+private final class StartupWindowMaximizingView: NSView {
+    private var didMaximize = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+
+        guard !didMaximize, let window else { return }
+        didMaximize = true
+
+        DispatchQueue.main.async { [weak window] in
+            guard let window,
+                  let screen = window.screen ?? NSScreen.main else { return }
+            window.setFrame(screen.visibleFrame, display: true)
         }
     }
 }

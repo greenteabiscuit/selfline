@@ -609,10 +609,11 @@ final class TimelineViewModel: ObservableObject {
             refreshSearchIfNeeded()
             if result.stagingCleanupFailed {
                 presentNotice(
-                    "Note sent. A leftover staging file will be removed automatically at next launch."
+                    "A leftover staging file will be removed automatically at next launch."
                 )
             } else {
-                presentNotice("Note sent.")
+                noticeMessage = nil
+                errorMessage = nil
             }
             return note
         } catch {

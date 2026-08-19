@@ -294,22 +294,21 @@ private struct SelectableLinkedText: NSViewRepresentable {
         context: Context
     ) -> CGSize? {
         guard let textContainer = textView.textContainer,
-              let layoutManager = textView.layoutManager else {
+              let layoutManager = textView.layoutManager,
+              let proposedWidth = proposal.width,
+              proposedWidth.isFinite,
+              proposedWidth > 0 else {
             return nil
         }
-        let proposedWidth = proposal.width.flatMap { width in
-            width.isFinite && width > 0 ? width : nil
-        }
-        let layoutWidth = proposedWidth ?? .greatestFiniteMagnitude
-        textView.frame.size.width = layoutWidth
+        textView.frame.size.width = proposedWidth
         textContainer.containerSize = NSSize(
-            width: layoutWidth,
+            width: proposedWidth,
             height: .greatestFiniteMagnitude
         )
         layoutManager.ensureLayout(for: textContainer)
         let usedSize = layoutManager.usedRect(for: textContainer).size
         return CGSize(
-            width: proposedWidth ?? ceil(usedSize.width),
+            width: proposedWidth,
             height: max(ceil(usedSize.height), NSFont.preferredFont(forTextStyle: .body).pointSize)
         )
     }

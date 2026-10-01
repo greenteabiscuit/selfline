@@ -174,7 +174,7 @@ enum NoteListSyntaxParser {
     }
 
     private static func unorderedMarker(for depth: Int) -> String {
-        ["•", "◦", "▪"][max(depth, 0) % 3]
+        ["•", "○", "▪"][max(depth, 0) % 3]
     }
 
     private static func orderedMarker(_ number: Int, depth: Int) -> String {

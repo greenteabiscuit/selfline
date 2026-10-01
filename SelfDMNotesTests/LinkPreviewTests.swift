@@ -177,7 +177,7 @@ final class LinkPreviewTests: XCTestCase {
         )
         XCTAssertEqual(
             NoteListSyntaxParser.displayMarkers(for: items),
-            ["•", "◦", "▪", "1.", "a.", "b.", "2."]
+            ["•", "○", "▪", "1.", "a.", "b.", "2."]
         )
         XCTAssertEqual(
             NoteListSyntaxParser.displayMarkers(

@@ -64,6 +64,52 @@ final class NoteTimelineUITests: XCTestCase {
         XCTAssertEqual(note.value as? String, "Line one\nLine two")
     }
 
+    func testNestedBulletsWithTabAndShiftTabSurviveSendAndRelaunch() {
+        let composer = composerField()
+        composer.click()
+        composer.typeText("- Filled circle")
+        app.typeKey(.return, modifierFlags: [])
+        app.typeKey(.tab, modifierFlags: [])
+        composer.typeText("Hollow circle")
+        app.typeKey(.return, modifierFlags: [])
+        app.typeKey(.tab, modifierFlags: [])
+        composer.typeText("Square")
+        app.typeKey(.return, modifierFlags: [])
+        app.typeKey(.tab, modifierFlags: [])
+        composer.typeText("Filled circle again")
+        app.typeKey(.return, modifierFlags: [])
+        app.typeKey(.tab, modifierFlags: [.shift])
+        composer.typeText("Back to square")
+
+        let body = "- Filled circle\n  - Hollow circle\n    - Square\n      - Filled circle again\n    - Back to square"
+        waitForValue(body, in: composer)
+        let composerScreenshot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        composerScreenshot.name = "Nested bullets in composer"
+        composerScreenshot.lifetime = .keepAlways
+        add(composerScreenshot)
+        app.typeKey(.return, modifierFlags: [.command])
+        waitForValue("", in: composer)
+
+        let note = app.descendants(matching: .any).matching(identifier: "note-body").firstMatch
+        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        // SwiftUI's containing accessibility group does not expose a value on
+        // every macOS version. Read the persisted source through the edit UI.
+        app.menuButtons["note-actions"].click()
+        app.menuItems["Edit"].click()
+        let editField = app.textViews["edit-note-field"]
+        XCTAssertTrue(editField.waitForExistence(timeout: 5))
+        waitForValue(body, in: editField)
+        app.buttons["Cancel"].click()
+        waitForNonexistence(editField)
+        let savedScreenshot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        savedScreenshot.name = "Nested bullets after relaunch"
+        savedScreenshot.lifetime = .keepAlways
+        add(savedScreenshot)
+    }
+
     func testNoteAndDraftSurviveRelaunchAndCommandNRestoresComposerFocus() {
         let composer = composerField()
         composer.click()

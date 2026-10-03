@@ -110,6 +110,73 @@ final class NoteTimelineUITests: XCTestCase {
         add(savedScreenshot)
     }
 
+    func testFormattedMessageEditingPreservesMarkupAndSupportsCancelAndSave() {
+        let body = "> Quoted text\nUse `value` here\n```\nlet value = 7\n```\n1. First item\n2. Second item\n- Parent\n  - Child"
+        let composer = composerField()
+        composer.click()
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(body, forType: .string)
+        app.typeKey("v", modifierFlags: [.command])
+        waitForValue(body, in: composer)
+        app.typeKey(.return, modifierFlags: [.command])
+        waitForValue("", in: composer)
+
+        app.menuButtons["note-actions"].click()
+        app.menuItems["Edit"].click()
+        let editor = app.textViews["edit-note-field"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        waitForValue(body, in: editor)
+        let initialScreenshot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        initialScreenshot.name = "Formatted message opened for editing"
+        initialScreenshot.lifetime = .keepAlways
+        add(initialScreenshot)
+
+        // Use the automatically focused editor, without clicking it first.
+        app.typeKey(.downArrow, modifierFlags: [.command])
+        app.typeKey(.return, modifierFlags: [])
+        app.typeKey(.tab, modifierFlags: [])
+        app.typeText("Grandchild")
+        let editedBody = body + "\n    - Grandchild"
+        waitForValue(editedBody, in: editor)
+        app.buttons["Cancel"].click()
+        waitForNonexistence(editor)
+
+        app.menuButtons["note-actions"].click()
+        app.menuItems["Edit"].click()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        waitForValue(body, in: editor)
+        app.typeKey(.downArrow, modifierFlags: [.command])
+        app.typeKey(.return, modifierFlags: [])
+        app.typeKey(.tab, modifierFlags: [])
+        app.typeText("Grandchild")
+        waitForValue(editedBody, in: editor)
+        let editedScreenshot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        editedScreenshot.name = "Formatted message after editing"
+        editedScreenshot.lifetime = .keepAlways
+        add(editedScreenshot)
+        app.typeKey(.return, modifierFlags: [.command])
+        waitForNonexistence(editor)
+        waitForValue("", in: composer)
+
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(app.menuButtons["note-actions"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.menuButtons.matching(identifier: "note-actions").count, 1)
+        app.menuButtons["note-actions"].click()
+        app.menuItems["Edit"].click()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        waitForValue(editedBody, in: editor)
+
+        // The keyboard shortcut must obey the same empty-note guard as Save.
+        app.typeKey("a", modifierFlags: [.command])
+        app.typeKey(.delete, modifierFlags: [])
+        waitForValue("", in: editor)
+        XCTAssertFalse(app.buttons["save-edit-button"].isEnabled)
+        app.typeKey(.return, modifierFlags: [.command])
+        XCTAssertTrue(editor.exists)
+        app.buttons["Cancel"].click()
+    }
+
     func testNoteAndDraftSurviveRelaunchAndCommandNRestoresComposerFocus() {
         let composer = composerField()
         composer.click()

@@ -7,7 +7,7 @@ struct EditNoteView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var bodyText: String
     @State private var isSaving = false
-    @FocusState private var editorFocused: Bool
+    @State private var editorFocusGeneration = 0
 
     init(note: Note, model: TimelineViewModel) {
         self.note = note
@@ -33,13 +33,16 @@ struct EditNoteView: View {
                 )
             }
 
-            TextEditor(text: $bodyText)
-                .font(.body)
-                .frame(minHeight: 180)
-                .disabled(!model.canMutateLibrary)
-                .focused($editorFocused)
-                .accessibilityIdentifier("edit-note-field")
-                .accessibilityLabel("Edit note text")
+            ComposerTextView(
+                text: $bodyText,
+                focusGeneration: editorFocusGeneration,
+                isEditable: model.canMutateLibrary && !isSaving,
+                onSend: save,
+                accessibilityIdentifier: "edit-note-field",
+                accessibilityLabel: "Edit note text",
+                accessibilityHelp: "Command Return saves the edit. Return inserts a new line and continues a quote, list, or code block. Return again on an empty line exits that block. Tab and Shift Tab change list nesting."
+            )
+            .frame(minHeight: 180)
 
             HStack {
                 Spacer()
@@ -50,11 +53,7 @@ struct EditNoteView: View {
                     save()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(
-                    isSaving
-                        || !model.canMutateLibrary
-                        || (!hasVisibleText && note.attachments.isEmpty)
-                )
+                .disabled(!canSave)
                 .accessibilityIdentifier("save-edit-button")
                 .accessibilityHint("Saves the edit without changing the note's original order.")
             }
@@ -62,8 +61,13 @@ struct EditNoteView: View {
         .padding(20)
         .frame(minWidth: 520, minHeight: 340)
         .onAppear {
-            editorFocused = true
+            editorFocusGeneration += 1
         }
+    }
+
+    private var canSave: Bool {
+        !isSaving && model.canMutateLibrary
+            && (hasVisibleText || !note.attachments.isEmpty)
     }
 
     private var hasVisibleText: Bool {
@@ -73,7 +77,7 @@ struct EditNoteView: View {
     }
 
     private func save() {
-        guard !isSaving, model.canMutateLibrary else { return }
+        guard canSave else { return }
         isSaving = true
         Task {
             let didSave = await model.editNote(note, body: bodyText)

@@ -792,7 +792,7 @@ struct ComposerTextView: NSViewRepresentable {
     let focusGeneration: Int
     let isEditable: Bool
     let onSend: () -> Void
-    let onPasteImage: (Data, String, String) -> Void
+    var onPasteImage: ((Data, String, String) -> Void)? = nil
     var accessibilityIdentifier = "composer-field"
     var accessibilityLabel = "Write a note"
     var accessibilityHelp = "Command Return sends the note. Return inserts a new line and continues a quote, list, or code block. Return again on an empty line exits that block. A greater-than sign starts a quote, a hyphen starts bullets, and one followed by a period starts numbering. Tab and Shift Tab change list nesting. Single and triple backticks preview code formatting. Pasting a clipboard image adds it as an attachment."
@@ -1016,12 +1016,12 @@ private final class SendingTextView: NSTextView {
 
     override func paste(_ sender: Any?) {
         let pasteboard = NSPasteboard.general
-        if let data = pasteboard.data(forType: .png) {
-            onPasteImage?(data, "Pasted Image.png", "public.png")
+        if let onPasteImage, let data = pasteboard.data(forType: .png) {
+            onPasteImage(data, "Pasted Image.png", "public.png")
             return
         }
-        if let data = pasteboard.data(forType: .tiff) {
-            onPasteImage?(data, "Pasted Image.tiff", "public.tiff")
+        if let onPasteImage, let data = pasteboard.data(forType: .tiff) {
+            onPasteImage(data, "Pasted Image.tiff", "public.tiff")
             return
         }
         let emojiPreservingText = ComposerPasteboardText.emojiPreservingString(from: pasteboard)

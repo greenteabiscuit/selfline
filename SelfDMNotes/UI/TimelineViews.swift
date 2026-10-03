@@ -361,19 +361,60 @@ struct LinkedNoteBodyText: View {
     }
 }
 
+enum NoteListMarkerDrawing {
+    static func bulletPath(for marker: String, in rect: CGRect, font: NSFont) -> CGPath? {
+        guard ["•", "○", "▪"].contains(marker) else { return nil }
+        // Match the circle and square's visual weight without relying on glyph sizes.
+        let diameter = font.pointSize * 0.42
+        let size = marker == "▪" ? diameter * 0.9 : diameter
+        let bounds = CGRect(
+            x: rect.maxX - size,
+            y: rect.minY + font.ascender - font.xHeight / 2 - size / 2,
+            width: size,
+            height: size
+        )
+        let path = CGMutablePath()
+        if marker == "▪" {
+            path.addRect(bounds)
+        } else {
+            path.addEllipse(in: bounds)
+            if marker == "○" {
+                let strokeWidth = font.pointSize / 13
+                path.addEllipse(in: bounds.insetBy(dx: strokeWidth, dy: strokeWidth))
+            }
+        }
+        return path
+    }
+}
+
 private struct NoteListBlock: View {
     let items: [NoteBodyListItem]
 
     var body: some View {
         let markers = NoteListSyntaxParser.displayMarkers(for: items)
+        let bodyFont = NSFont.preferredFont(forTextStyle: .body)
+        let markerRect = CGRect(
+            x: 0, y: 0, width: 24,
+            height: ceil(bodyFont.ascender - bodyFont.descender + bodyFont.leading)
+        )
         VStack(alignment: .leading, spacing: 4) {
             ForEach(items.indices, id: \.self) { index in
                 let item = items[index]
                 let marker = markers[index]
                 HStack(alignment: .top, spacing: 8) {
-                    Text(marker)
-                        .frame(width: 24, alignment: .trailing)
-                        .accessibilityHidden(true)
+                    Group {
+                        if let path = NoteListMarkerDrawing.bulletPath(
+                            for: marker, in: markerRect, font: bodyFont
+                        ) {
+                            Path(path)
+                                .fill(style: FillStyle(eoFill: true))
+                                .frame(width: markerRect.width, height: markerRect.height)
+                        } else {
+                            Text(marker)
+                                .frame(width: markerRect.width, alignment: .trailing)
+                        }
+                    }
+                    .accessibilityHidden(true)
                     SelectableLinkedText(
                         attributedText: NoteBodyLinkFormatter.appKitAttributedString(for: item.content)
                     )

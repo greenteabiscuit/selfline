@@ -989,8 +989,9 @@ private final class SendingTextView: NSTextView {
 
         let markerStyle = NSMutableParagraphStyle()
         markerStyle.alignment = .right
+        let markerFont = NSFont.preferredFont(forTextStyle: .body)
         let markerAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.preferredFont(forTextStyle: .body),
+            .font: markerFont,
             .foregroundColor: NSColor.textColor,
             .paragraphStyle: markerStyle
         ]
@@ -1010,7 +1011,17 @@ private final class SendingTextView: NSTextView {
                 width: 24,
                 height: lineRect.height
             )
-            (item.marker as NSString).draw(in: markerRect, withAttributes: markerAttributes)
+            if let path = NoteListMarkerDrawing.bulletPath(
+                for: item.marker, in: markerRect, font: markerFont
+            ), let context = NSGraphicsContext.current?.cgContext {
+                context.saveGState()
+                context.setFillColor(NSColor.textColor.cgColor)
+                context.addPath(path)
+                context.fillPath(using: .evenOdd)
+                context.restoreGState()
+            } else {
+                (item.marker as NSString).draw(in: markerRect, withAttributes: markerAttributes)
+            }
         }
     }
 

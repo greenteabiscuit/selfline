@@ -120,7 +120,14 @@ enum ComposerCodeSyntaxParser {
             guard !fencedRegions.contains(where: { rangesOverlap($0.range, match.range) }) else {
                 return nil
             }
-            return ComposerCodeRegion(kind: .inline, range: match.range)
+            return ComposerCodeRegion(
+                kind: .inline,
+                range: match.range,
+                markerRanges: [
+                    NSRange(location: match.range.location, length: 1),
+                    NSRange(location: NSMaxRange(match.range) - 1, length: 1)
+                ]
+            )
         }
         return (fencedRegions + inlineRegions).sorted { $0.range.location < $1.range.location }
     }
@@ -655,15 +662,16 @@ enum ComposerMarkupHighlighter {
                     ],
                     range: region.range
                 )
-                for markerRange in region.markerRanges where markerRange.length > 0 {
-                    textStorage.addAttributes(
-                        [
-                            .font: NSFont.systemFont(ofSize: 0.1),
-                            .foregroundColor: NSColor.clear
-                        ],
-                        range: markerRange
-                    )
-                }
+            }
+            for markerRange in region.markerRanges where markerRange.length > 0 {
+                textStorage.addAttributes(
+                    [
+                        .font: NSFont.systemFont(ofSize: 0.1),
+                        .foregroundColor: NSColor.clear,
+                        .backgroundColor: NSColor.clear
+                    ],
+                    range: markerRange
+                )
             }
         }
         for region in quoteRegions {
@@ -731,6 +739,13 @@ enum ComposerMarkupHighlighter {
             guard case .fenced(isClosed: false) = region.kind else { return false }
             return location == NSMaxRange(region.range) && location == textLength
         }), region.range.length > 0 {
+            if case .inline = region.kind {
+                guard location > region.range.location else { return fallback }
+                return textStorage.attributes(
+                    at: region.range.location + 1,
+                    effectiveRange: nil
+                )
+            }
             if case .fenced(isClosed: false) = region.kind,
                location == NSMaxRange(region.range),
                location == textLength {

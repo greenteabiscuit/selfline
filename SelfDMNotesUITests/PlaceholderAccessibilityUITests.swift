@@ -64,6 +64,44 @@ final class NoteTimelineUITests: XCTestCase {
         XCTAssertEqual(note.value as? String, "Line one\nLine two")
     }
 
+    func testInlineCodePreviewWhileTypingPreservesSourceAndSentText() {
+        let composer = composerField()
+        composer.click()
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("たぶん今\n", forType: .string)
+        app.typeKey("v", modifierFlags: [.command])
+        composer.typeText("`hello world")
+        waitForValue("たぶん今\n`hello world", in: composer)
+        composer.typeText("`")
+        waitForValue("たぶん今\n`hello world`", in: composer)
+
+        let preview = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        preview.name = "Inline code markers hidden while composing"
+        preview.lifetime = .keepAlways
+        add(preview)
+
+        app.typeKey(.delete, modifierFlags: [])
+        waitForValue("たぶん今\n`hello world", in: composer)
+        composer.typeText("`")
+        app.typeKey(.leftArrow, modifierFlags: [])
+        composer.typeText("!")
+        app.typeKey(.rightArrow, modifierFlags: [])
+        composer.typeText(" after")
+        waitForValue("たぶん今\n`hello world!` after", in: composer)
+
+        let edited = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        edited.name = "Visible typing inside and after inline code"
+        edited.lifetime = .keepAlways
+        add(edited)
+
+        app.typeKey(.return, modifierFlags: [.command])
+        waitForValue("", in: composer)
+        let note = app.descendants(matching: .any).matching(identifier: "note-body")
+            .firstMatch.textViews.firstMatch
+        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        waitForValue("たぶん今\nhello world! after", in: note)
+    }
+
     func testNestedBulletsWithTabAndShiftTabSurviveSendAndRelaunch() {
         let composer = composerField()
         composer.click()

@@ -198,7 +198,11 @@ final class LinkPreviewTests: XCTestCase {
             [
                 ComposerCodeRegion(
                     kind: .inline,
-                    range: source.range(of: "`value`")
+                    range: source.range(of: "`value`"),
+                    markerRanges: [
+                        NSRange(location: 4, length: 1),
+                        NSRange(location: 10, length: 1)
+                    ]
                 ),
                 ComposerCodeRegion(
                     kind: .fenced(isClosed: true),
@@ -620,6 +624,79 @@ final class LinkPreviewTests: XCTestCase {
     }
 
     @MainActor
+    func testComposerInlineCodeHidesOnlyPairedMarkersAndRestoresUnclosedText() throws {
+        let textView = NSTextView()
+        let body = "たぶん今 🚀\n`hello world` and `値` then `unfinished"
+        textView.string = body
+        let source = body as NSString
+        let selection = source.range(of: "world")
+        textView.setSelectedRange(selection)
+
+        ComposerMarkupHighlighter.apply(to: textView)
+
+        XCTAssertEqual(textView.string, body)
+        XCTAssertEqual(textView.selectedRange(), selection)
+        for code in ["`hello world`", "`値`"] {
+            let range = source.range(of: code)
+            for location in [range.location, NSMaxRange(range) - 1] {
+                let attributes = try XCTUnwrap(textView.textStorage?.attributes(
+                    at: location,
+                    effectiveRange: nil
+                ))
+                XCTAssertEqual(attributes[.foregroundColor] as? NSColor, .clear)
+                XCTAssertEqual(attributes[.backgroundColor] as? NSColor, .clear)
+                XCTAssertLessThan(try XCTUnwrap(attributes[.font] as? NSFont).pointSize, 1)
+            }
+            let attributes = try XCTUnwrap(textView.textStorage?.attributes(
+                at: range.location + 1,
+                effectiveRange: nil
+            ))
+            XCTAssertEqual(attributes[.foregroundColor] as? NSColor, .systemRed)
+            XCTAssertTrue(try XCTUnwrap(attributes[.font] as? NSFont).isFixedPitch)
+        }
+        XCTAssertEqual(textView.textStorage?.attribute(
+            .foregroundColor,
+            at: source.range(of: "`unfinished").location,
+            effectiveRange: nil
+        ) as? NSColor, .textColor)
+
+        // Removing the closing delimiter must also undo the hidden opening marker.
+        textView.string = "`hello`"
+        ComposerMarkupHighlighter.apply(to: textView)
+        textView.textStorage?.deleteCharacters(in: NSRange(location: 6, length: 1))
+        ComposerMarkupHighlighter.apply(to: textView)
+        for location in 0..<6 {
+            let attributes = try XCTUnwrap(textView.textStorage?.attributes(
+                at: location,
+                effectiveRange: nil
+            ))
+            XCTAssertEqual(attributes[.foregroundColor] as? NSColor, .textColor)
+            XCTAssertGreaterThan(try XCTUnwrap(attributes[.font] as? NSFont).pointSize, 1)
+        }
+    }
+
+    @MainActor
+    func testComposerInlineCodeTypingAtBothDelimitersStaysVisible() throws {
+        let textView = NSTextView()
+        textView.string = "前 `値🚀` 後"
+        for (location, color) in [
+            (2, NSColor.textColor), // Before the opening marker.
+            (3, NSColor.systemRed), // After the opening marker.
+            (6, NSColor.systemRed), // Before the closing marker (UTF-16 offset).
+            (7, NSColor.textColor) // After the closing marker.
+        ] {
+            textView.setSelectedRange(NSRange(location: location, length: 0))
+            ComposerMarkupHighlighter.apply(to: textView)
+            XCTAssertEqual(textView.typingAttributes[.foregroundColor] as? NSColor, color)
+            XCTAssertGreaterThan(
+                try XCTUnwrap(textView.typingAttributes[.font] as? NSFont).pointSize,
+                1
+            )
+            XCTAssertEqual(textView.selectedRange(), NSRange(location: location, length: 0))
+        }
+    }
+
+    @MainActor
     func testComposerMarkupHighlighterAppliesLiveQuoteBlockAndCodeStyles() throws {
         let textView = NSTextView()
         textView.string = "> Quoted text\nUse `value`\n```\nlet value = 1"
@@ -629,7 +706,7 @@ final class LinkPreviewTests: XCTestCase {
         let source = textView.string as NSString
         let quoteLocation = source.range(of: "Quoted text").location
         let quoteMarkerLocation = source.range(of: "> ").location
-        let inlineLocation = source.range(of: "`value`").location
+        let inlineLocation = source.range(of: "value").location
         let blockLocation = source.range(of: "```\nlet value = 1").location
         let markerLocation = source.range(of: "```").location
         let quoteAttributes = try XCTUnwrap(textView.textStorage?.attributes(

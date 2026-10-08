@@ -587,6 +587,61 @@ final class LinkPreviewTests: XCTestCase {
     }
 
     @MainActor
+    func testComposerMarkedTextKeepsDrawingRangesCurrentWithoutRestylingComposition() throws {
+        let textView = SendingTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 240))
+        let composer = ComposerTextView(
+            text: .constant(""),
+            focusGeneration: 0,
+            isEditable: true,
+            onSend: {}
+        )
+        let coordinator = composer.makeCoordinator()
+        textView.delegate = coordinator
+        textView.string = "- Parent🚀\n  - 子\n- 後\n> 引用\n```\ncode\n```"
+        textView.setSelectedRange(NSRange(
+            location: NSMaxRange((textView.string as NSString).range(of: "子")),
+            length: 0
+        ))
+        ComposerMarkupHighlighter.apply(to: textView)
+
+        // Grow and then shrink the marked text before a differently indented item.
+        // Stale offsets put that item's filled bullet on the hollow-bullet line.
+        for composition in ["あいうえお", "あ"] {
+            textView.setMarkedText(
+                composition,
+                selectedRange: NSRange(location: (composition as NSString).length, length: 0),
+                replacementRange: NSRange(location: NSNotFound, length: 0)
+            )
+            XCTAssertTrue(textView.hasMarkedText())
+            let markedRange = textView.markedRange()
+            let selection = textView.selectedRange()
+            let storage = try XCTUnwrap(textView.textStorage)
+            let attributesBeforeHighlight = NSAttributedString(attributedString: storage)
+
+            // AppKit need not notify the delegate during composition.
+            let source = textView.string as NSString
+            XCTAssertEqual(textView.listItems, [
+                ComposerListDrawingItem(range: source.range(of: "- Parent🚀"), marker: "•", depth: 0),
+                ComposerListDrawingItem(range: source.range(of: "  - 子" + composition), marker: "○", depth: 1),
+                ComposerListDrawingItem(range: source.range(of: "- 後"), marker: "•", depth: 0)
+            ])
+            XCTAssertEqual(textView.quoteBlockRanges, [source.range(of: "> 引用")])
+            XCTAssertEqual(textView.codeBlockRegions.map(\.range), [source.range(of: "```\ncode\n```")])
+
+            coordinator.textDidChange(Notification(name: NSText.didChangeNotification, object: textView))
+            XCTAssertEqual(textView.markedRange(), markedRange)
+            XCTAssertEqual(textView.selectedRange(), selection)
+            XCTAssertTrue(storage.isEqual(to: attributesBeforeHighlight))
+        }
+
+        textView.insertText("亜", replacementRange: NSRange(location: NSNotFound, length: 0))
+        coordinator.textDidChange(Notification(name: NSText.didChangeNotification, object: textView))
+        XCTAssertFalse(textView.hasMarkedText())
+        XCTAssertEqual(textView.string, "- Parent🚀\n  - 子亜\n- 後\n> 引用\n```\ncode\n```")
+        XCTAssertEqual(textView.listItems.last?.range, (textView.string as NSString).range(of: "- 後"))
+    }
+
+    @MainActor
     func testComposerMarkupHighlighterKeepsSameLineFenceContentVisibleAndSelected() throws {
         let emptyCodeTextView = NSTextView()
         emptyCodeTextView.string = "```"

@@ -613,6 +613,10 @@ enum ComposerMarkupHighlighter {
                 depth: sourceItem.item.depth
             )
         }
+        // Composition shifts later drawing ranges too. Refresh them above, but
+        // leave the IME's marked text, attributes, and selection untouched.
+        guard !textView.hasMarkedText() else { return }
+
         let bodyFont = NSFont.preferredFont(forTextStyle: .body)
         let quoteParagraphStyle = NSMutableParagraphStyle()
         quoteParagraphStyle.setParagraphStyle(NSParagraphStyle.default)
@@ -896,15 +900,13 @@ struct ComposerTextView: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            if !textView.hasMarkedText() {
-                ComposerMarkupHighlighter.apply(to: textView)
-            }
+            ComposerMarkupHighlighter.apply(to: textView)
             parent.text = textView.string
         }
     }
 }
 
-private final class SendingTextView: NSTextView {
+final class SendingTextView: NSTextView {
     var onSend: (() -> Void)?
     var onPasteImage: ((Data, String, String) -> Void)?
     var codeBlockRegions: [ComposerCodeRegion] = [] {
@@ -927,6 +929,16 @@ private final class SendingTextView: NSTextView {
                 needsDisplay = true
             }
         }
+    }
+
+    override func setMarkedText(
+        _ string: Any,
+        selectedRange: NSRange,
+        replacementRange: NSRange
+    ) {
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        // IME updates do not necessarily send textDidChange to the delegate.
+        ComposerMarkupHighlighter.apply(to: self)
     }
 
     override func drawBackground(in rect: NSRect) {

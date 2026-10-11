@@ -618,6 +618,12 @@ enum ComposerMarkupHighlighter {
         guard !textView.hasMarkedText() else { return }
 
         let bodyFont = NSFont.preferredFont(forTextStyle: .body)
+        let codeParagraphStyle = NSMutableParagraphStyle()
+        codeParagraphStyle.setParagraphStyle(NSParagraphStyle.default)
+        // Hidden fence markers must not collapse an otherwise empty code line.
+        codeParagraphStyle.minimumLineHeight = ceil(
+            bodyFont.ascender - bodyFont.descender + bodyFont.leading
+        )
         let quoteParagraphStyle = NSMutableParagraphStyle()
         quoteParagraphStyle.setParagraphStyle(NSParagraphStyle.default)
         quoteParagraphStyle.firstLineHeadIndent = 14
@@ -662,7 +668,8 @@ enum ComposerMarkupHighlighter {
                             ofSize: bodyFont.pointSize,
                             weight: .regular
                         ),
-                        .foregroundColor: NSColor.textColor
+                        .foregroundColor: NSColor.textColor,
+                        .paragraphStyle: codeParagraphStyle
                     ],
                     range: region.range
                 )

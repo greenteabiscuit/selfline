@@ -642,6 +642,31 @@ final class LinkPreviewTests: XCTestCase {
     }
 
     @MainActor
+    func testComposerFenceOnlyLinesKeepAVisibleTextLineHeight() throws {
+        for body in ["```", "```\n", "```\n```", "```\nvalue\n```"] {
+            let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 320, height: 160))
+            textView.string = body
+            textView.setSelectedRange(NSRange(location: (body as NSString).length, length: 0))
+
+            ComposerMarkupHighlighter.apply(to: textView)
+
+            let layoutManager = try XCTUnwrap(textView.layoutManager)
+            let textContainer = try XCTUnwrap(textView.textContainer)
+            layoutManager.ensureLayout(for: textContainer)
+            let glyphRange = layoutManager.glyphRange(
+                forCharacterRange: NSRange(location: 0, length: (body as NSString).length),
+                actualCharacterRange: nil
+            )
+            let minimumHeight = layoutManager.defaultLineHeight(for: .preferredFont(forTextStyle: .body))
+            layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { lineRect, _, _, _, _ in
+                XCTAssertGreaterThanOrEqual(lineRect.height, minimumHeight, "Source: \(body.debugDescription)")
+            }
+            XCTAssertEqual(textView.string, body)
+            XCTAssertEqual(textView.selectedRange(), NSRange(location: (body as NSString).length, length: 0))
+        }
+    }
+
+    @MainActor
     func testComposerMarkupHighlighterKeepsSameLineFenceContentVisibleAndSelected() throws {
         let emptyCodeTextView = NSTextView()
         emptyCodeTextView.string = "```"

@@ -1188,6 +1188,10 @@ final class TimelineViewModel: ObservableObject {
         attachmentStore?.thumbnailURL(for: attachment)
     }
 
+    func thumbnailURL(for attachment: StagedAttachment) -> URL? {
+        attachmentStore?.thumbnailURL(for: attachment)
+    }
+
     func linkPreviewImageURL(for preview: LinkPreview) -> URL? {
         guard let filename = preview.localImageFilename else { return nil }
         return linkPreviewCoordinator?.localImageURL(filename: filename)

@@ -819,9 +819,10 @@ struct ComposerTextView: NSViewRepresentable {
     let isEditable: Bool
     let onSend: () -> Void
     var onPasteImage: ((Data, String, String) -> Void)? = nil
+    var onDropFiles: (([URL]) -> Void)? = nil
     var accessibilityIdentifier = "composer-field"
     var accessibilityLabel = "Write a note"
-    var accessibilityHelp = "Command Return sends the note. Return inserts a new line and continues a quote, list, or code block. Return again on an empty line exits that block. A greater-than sign starts a quote, a hyphen starts bullets, and one followed by a period starts numbering. Tab and Shift Tab change list nesting. Single and triple backticks preview code formatting. Pasting a clipboard image adds it as an attachment."
+    var accessibilityHelp = "Command Return sends the note. Return inserts a new line and continues a quote, list, or code block. Return again on an empty line exits that block. A greater-than sign starts a quote, a hyphen starts bullets, and one followed by a period starts numbering. Tab and Shift Tab change list nesting. Single and triple backticks preview code formatting. Pasting a clipboard image or dropping files or images adds them as attachments."
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -851,6 +852,7 @@ struct ComposerTextView: NSViewRepresentable {
         ComposerMarkupHighlighter.apply(to: textView)
         textView.onSend = onSend
         textView.onPasteImage = onPasteImage
+        textView.onDropFiles = onDropFiles
         textView.setAccessibilityIdentifier(accessibilityIdentifier)
         textView.setAccessibilityLabel(accessibilityLabel)
         textView.setAccessibilityHelp(accessibilityHelp)
@@ -864,6 +866,7 @@ struct ComposerTextView: NSViewRepresentable {
         context.coordinator.parent = self
         textView.onSend = onSend
         textView.onPasteImage = onPasteImage
+        textView.onDropFiles = onDropFiles
         textView.isEditable = isEditable
         textView.setAccessibilityIdentifier(accessibilityIdentifier)
         textView.setAccessibilityLabel(accessibilityLabel)
@@ -916,6 +919,7 @@ struct ComposerTextView: NSViewRepresentable {
 final class SendingTextView: NSTextView {
     var onSend: (() -> Void)?
     var onPasteImage: ((Data, String, String) -> Void)?
+    var onDropFiles: (([URL]) -> Void)?
     var codeBlockRegions: [ComposerCodeRegion] = [] {
         didSet {
             if oldValue != codeBlockRegions {
@@ -1085,6 +1089,96 @@ final class SendingTextView: NSTextView {
             return
         }
         super.paste(sender)
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        acceptsAttachmentDrop(sender) ? .copy : super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        acceptsAttachmentDrop(sender) ? .copy : super.draggingUpdated(sender)
+    }
+
+    override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        acceptsAttachmentDrop(sender) || super.prepareForDragOperation(sender)
+    }
+
+    /// Plain-text NSTextView inserts a dropped file's path. Route files, file
+    /// promises (Photos, browsers), and bare image data to attachments instead.
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        guard acceptsAttachmentDrop(sender) else {
+            return super.performDragOperation(sender)
+        }
+        let pasteboard = sender.draggingPasteboard
+        if let urls = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: Self.fileURLReadingOptions
+        ) as? [URL], !urls.isEmpty {
+            onDropFiles?(urls)
+            return true
+        }
+        if let receivers = pasteboard.readObjects(
+            forClasses: [NSFilePromiseReceiver.self]
+        ) as? [NSFilePromiseReceiver], !receivers.isEmpty {
+            receivePromisedFiles(receivers)
+            return true
+        }
+        if let data = pasteboard.data(forType: .png) {
+            onPasteImage?(data, "Dropped Image.png", "public.png")
+            return true
+        }
+        if let data = pasteboard.data(forType: .tiff) {
+            onPasteImage?(data, "Dropped Image.tiff", "public.tiff")
+            return true
+        }
+        return false
+    }
+
+    private static let fileURLReadingOptions: [NSPasteboard.ReadingOptionKey: Any] = [
+        .urlReadingFileURLsOnly: true
+    ]
+
+    private func acceptsAttachmentDrop(_ sender: any NSDraggingInfo) -> Bool {
+        let pasteboard = sender.draggingPasteboard
+        if onDropFiles != nil,
+           pasteboard.canReadObject(forClasses: [NSURL.self], options: Self.fileURLReadingOptions)
+            || pasteboard.canReadObject(forClasses: [NSFilePromiseReceiver.self]) {
+            return true
+        }
+        // Text drags from some apps also carry a rendered image; keep those as text.
+        return onPasteImage != nil
+            && pasteboard.availableType(from: [.png, .tiff]) != nil
+            && pasteboard.availableType(from: [.string]) == nil
+    }
+
+    private func receivePromisedFiles(_ receivers: [NSFilePromiseReceiver]) {
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "DroppedAttachments-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        do {
+            try FileManager.default.createDirectory(
+                at: destination,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            NSSound.beep()
+            return
+        }
+        for receiver in receivers {
+            receiver.receivePromisedFiles(
+                atDestination: destination,
+                options: [:],
+                // The reader only hands the written URL to the main-actor import path.
+                operationQueue: .main
+            ) { [weak self] url, error in
+                guard error == nil else {
+                    NSSound.beep()
+                    return
+                }
+                self?.onDropFiles?([url])
+            }
+        }
     }
 
     override func mouseDown(with event: NSEvent) {

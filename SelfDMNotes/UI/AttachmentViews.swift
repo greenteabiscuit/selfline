@@ -61,9 +61,19 @@ private struct PendingAttachmentRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: statusSymbol)
-                .foregroundStyle(statusColor)
-                .accessibilityHidden(true)
+            if attachment.status == .ready,
+               let staged = attachment.stagedAttachment,
+               staged.isImage,
+               let thumbnailURL = model.thumbnailURL(for: staged) {
+                AttachmentThumbnail(
+                    url: thumbnailURL,
+                    accessibilityLabel: "Preview of \(attachment.displayName)"
+                )
+            } else {
+                Image(systemName: statusSymbol)
+                    .foregroundStyle(statusColor)
+                    .accessibilityHidden(true)
+            }
             VStack(alignment: .leading, spacing: 3) {
                 Text(attachment.displayName)
                     .font(.callout.weight(.medium))
@@ -256,7 +266,7 @@ private struct AttachmentCard: View {
     }
 }
 
-private struct AttachmentThumbnail: View {
+struct AttachmentThumbnail: View {
     let url: URL
     let accessibilityLabel: String
 

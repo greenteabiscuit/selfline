@@ -434,6 +434,12 @@ final class AttachmentStore: @unchecked Sendable {
         }
     }
 
+    func thumbnailURL(for attachment: StagedAttachment) -> URL? {
+        attachment.thumbnailStagingFilename.map {
+            provider.stagingURL.appendingPathComponent($0, isDirectory: false)
+        }
+    }
+
     func attachmentIsAvailable(_ attachment: Attachment) -> Bool {
         fileManager.fileExists(atPath: originalURL(for: attachment).path)
     }

@@ -1,4 +1,5 @@
 import AppKit
+import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -47,6 +48,9 @@ struct ContentView: View {
     @State private var isReplyAttachmentPickerPresented = false
     @State private var replyAttachmentPickerOwner: ReplySessionIdentity?
     @State private var isReplyAttachmentDropTargeted = false
+    @State private var isPhotoPickerPresented = false
+    @State private var photoPickerTarget: PhotoPickerTarget?
+    @State private var photoPickerItems: [PhotosPickerItem] = []
     @State private var threadSearchTargetID: UUID?
     @State private var searchNavigationID: UUID?
 
@@ -237,6 +241,52 @@ struct ContentView: View {
                 focusReplyComposer(rootID: owner.rootID, token: owner.token)
             }
         }
+        .photosPicker(
+            isPresented: $isPhotoPickerPresented,
+            selection: $photoPickerItems,
+            matching: .images
+        )
+        .onChange(of: photoPickerItems) { _, items in
+            guard !items.isEmpty, let target = photoPickerTarget else { return }
+            photoPickerItems = []
+            addPickedPhotos(items, to: target)
+        }
+    }
+
+    private func addPickedPhotos(_ items: [PhotosPickerItem], to target: PhotoPickerTarget) {
+        Task {
+            for item in items {
+                let photo: PickedPhotoFile?
+                do {
+                    photo = try await item.loadTransferable(type: PickedPhotoFile.self)
+                } catch {
+                    model.reportAttachmentCaptureError(
+                        "A photo could not be loaded from the Photos library. Details: \(error.localizedDescription)"
+                    )
+                    continue
+                }
+                guard let photo else {
+                    model.reportAttachmentCaptureError(
+                        "A selected photo is not available as an image file."
+                    )
+                    continue
+                }
+                switch target {
+                case .composer:
+                    model.addFileAttachments([photo.url])
+                case let .reply(owner):
+                    if replySession?.matches(owner) == true {
+                        addReplyFiles([photo.url])
+                    }
+                }
+            }
+            switch target {
+            case .composer:
+                composerFocusGeneration += 1
+            case let .reply(owner):
+                focusReplyComposer(rootID: owner.rootID, token: owner.token)
+            }
+        }
     }
 
     private var header: some View {
@@ -368,7 +418,7 @@ struct ContentView: View {
 
     private func timeline(proxy: ScrollViewProxy) -> some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 12) {
                 if model.isLoading {
                     ProgressView("Loading notes…")
                         .frame(maxWidth: .infinity)
@@ -394,14 +444,14 @@ struct ContentView: View {
                         .disabled(model.isLoadingOlder)
                         .accessibilityIdentifier("load-older-notes")
                         .accessibilityHint("Loads the previous bounded page.")
-                        .onAppear {
-                            if didInitialScroll {
+                        .onVisibleInScrollView { isVisible in
+                            if isVisible, didInitialScroll {
                                 loadOlderNotes()
                             }
                         }
                     }
 
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 12) {
                         ForEach(model.notes) { note in
                             VStack(alignment: .leading, spacing: 12) {
                                 if dateSeparatorIDs.contains(note.id) {
@@ -443,14 +493,11 @@ struct ContentView: View {
                 Color.clear
                     .frame(height: 1)
                     .id(Self.newestAnchor)
-                    .onAppear {
-                        isNearBottom = true
-                        if !model.isShowingTimelineContext {
+                    .onVisibleInScrollView { isVisible in
+                        isNearBottom = isVisible
+                        if isVisible, !model.isShowingTimelineContext {
                             showNewestAction = false
                         }
-                    }
-                    .onDisappear {
-                        isNearBottom = false
                     }
             }
             .padding(16)
@@ -515,6 +562,10 @@ struct ContentView: View {
                         isAttachmentPickerPresented = true
                     }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
+                    Button("Choose Photos…", systemImage: "photo") {
+                        photoPickerTarget = .composer
+                        isPhotoPickerPresented = true
+                    }
                     Button("Paste Clipboard Image", systemImage: "photo.on.rectangle") {
                         pasteClipboardImage()
                     }
@@ -525,7 +576,7 @@ struct ContentView: View {
                 .accessibilityIdentifier("add-attachment-button")
                 .accessibilityLabel("Add attachment")
                 .accessibilityHint(
-                    "Choose files or paste a clipboard image. Command Shift A opens the file picker."
+                    "Choose files or photos, or paste a clipboard image. Command Shift A opens the file picker."
                 )
 
                 ComposerTextView(
@@ -545,7 +596,8 @@ struct ContentView: View {
                             filename: filename,
                             mediaType: mediaType
                         )
-                    }
+                    },
+                    onDropFiles: { urls in model.addFileAttachments(urls) }
                 )
                 .frame(minHeight: 48, maxHeight: 120)
 
@@ -761,6 +813,8 @@ struct ContentView: View {
                     ForEach(attachments) { attachment in
                         ReplyPendingAttachmentRow(
                             attachment: attachment,
+                            thumbnailURL: attachment.stagedAttachment
+                                .flatMap { $0.isImage ? model.thumbnailURL(for: $0) : nil },
                             canRemove: model.canMutateLibrary && !isSending,
                             remove: { removeReplyAttachment(id: attachment.id) }
                         )
@@ -775,6 +829,10 @@ struct ContentView: View {
                         isReplyAttachmentPickerPresented = true
                     }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
+                    Button("Choose Photos…", systemImage: "photo") {
+                        photoPickerTarget = session.map { .reply($0.identity) }
+                        isPhotoPickerPresented = photoPickerTarget != nil
+                    }
                     Button("Paste Clipboard Image", systemImage: "photo.on.rectangle") {
                         pasteReplyClipboardImage()
                     }
@@ -800,6 +858,7 @@ struct ContentView: View {
                             )
                         )
                     },
+                    onDropFiles: { urls in addReplyFiles(urls) },
                     accessibilityIdentifier: "reply-composer-field",
                     accessibilityLabel: "Write a reply",
                     accessibilityHelp: "Command Return sends the reply. Return inserts a new line and continues a quote or list. Return again on an empty quoted or top-level list line exits it. A greater-than sign starts a quote, a hyphen starts bullets, and one followed by a period starts numbering. Tab and Shift Tab change list nesting. Single and triple backticks preview code formatting. Pasting a clipboard image adds it to this reply."
@@ -1290,6 +1349,46 @@ struct ContentView: View {
     }
 }
 
+private extension View {
+    /// The timeline stack is not lazy (lazy stacks guess unrendered row heights and could
+    /// leave the timeline blank after a resize), so onAppear no longer follows scrolling.
+    func onVisibleInScrollView(_ action: @escaping (Bool) -> Void) -> some View {
+        onGeometryChange(for: Bool.self) { proxy in
+            guard let visibleBounds = proxy.bounds(of: .scrollView) else { return false }
+            return proxy.frame(in: .local).intersects(visibleBounds)
+        } action: { isVisible in
+            action(isVisible)
+        }
+    }
+}
+
+private enum PhotoPickerTarget {
+    case composer
+    case reply(ReplySessionIdentity)
+}
+
+/// Copies a Photos picker selection to a temporary file that keeps the
+/// library's original filename, so it can use the ordinary file import path.
+private struct PickedPhotoFile: Transferable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .image) { received in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "PickedPhotos-\(UUID().uuidString)",
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            let destination = directory.appendingPathComponent(received.file.lastPathComponent)
+            try FileManager.default.copyItem(at: received.file, to: destination)
+            return PickedPhotoFile(url: destination)
+        }
+    }
+}
+
 private enum ReplyAttachmentSource {
     case file(URL)
     case clipboard(data: Data, filename: String, mediaType: String)
@@ -1353,14 +1452,22 @@ struct ReplyDraftSession {
 
 private struct ReplyPendingAttachmentRow: View {
     let attachment: ReplyPendingAttachment
+    let thumbnailURL: URL?
     let canRemove: Bool
     let remove: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: statusSymbol)
-                .foregroundStyle(statusColor)
-                .accessibilityHidden(true)
+            if attachment.status == .ready, let thumbnailURL {
+                AttachmentThumbnail(
+                    url: thumbnailURL,
+                    accessibilityLabel: "Preview of \(attachment.displayName)"
+                )
+            } else {
+                Image(systemName: statusSymbol)
+                    .foregroundStyle(statusColor)
+                    .accessibilityHidden(true)
+            }
             VStack(alignment: .leading, spacing: 2) {
                 Text(attachment.displayName)
                     .font(.callout.weight(.medium))

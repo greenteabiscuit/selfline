@@ -33,7 +33,6 @@ struct ContentView: View {
     @State private var didInitialScroll = false
     @State private var isNearBottom = true
     @State private var showNewestAction = false
-    @State private var timelineScrollPosition: UUID?
     @State private var showTrash = false
     @State private var showDiscardConfirmation = false
     @State private var editingNote: Note?
@@ -502,7 +501,6 @@ struct ContentView: View {
             }
             .padding(16)
         }
-        .scrollPosition(id: $timelineScrollPosition)
         .defaultScrollAnchor(.bottom)
         .overlay(alignment: .bottomTrailing) {
             if (showNewestAction || model.isShowingTimelineContext), !model.notes.isEmpty {

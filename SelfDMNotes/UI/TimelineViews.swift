@@ -260,8 +260,57 @@ enum NoteBodyLinkFormatter {
 private struct SelectableLinkedText: NSViewRepresentable {
     let attributedText: NSAttributedString
 
+    /// Measures on its own text system and remembers heights by width. The timeline
+    /// lays out every note on each scroll frame, so measuring must not re-typeset
+    /// the displayed text view or resize it.
+    final class Coordinator {
+        private let textStorage = NSTextStorage()
+        private let layoutManager = NSLayoutManager()
+        private let textContainer = NSTextContainer()
+        private var heightsByWidth: [CGFloat: CGFloat] = [:]
+        private var measuredText: NSAttributedString?
+
+        init() {
+            textContainer.lineFragmentPadding = 0
+            textContainer.lineBreakMode = .byWordWrapping
+            layoutManager.addTextContainer(textContainer)
+            textStorage.addLayoutManager(layoutManager)
+        }
+
+        func height(of text: NSAttributedString, width: CGFloat) -> CGFloat {
+            if measuredText !== text {
+                measuredText = text
+                if !textStorage.isEqual(to: text) {
+                    textStorage.setAttributedString(text)
+                    heightsByWidth.removeAll()
+                }
+            }
+
+            if let height = heightsByWidth[width] {
+                return height
+            }
+            textContainer.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
+            layoutManager.ensureLayout(for: textContainer)
+            let height = max(
+                ceil(layoutManager.usedRect(for: textContainer).height),
+                NSFont.preferredFont(forTextStyle: .body).pointSize
+            )
+            // Live window resizing proposes many widths; keep only recent ones.
+            if heightsByWidth.count >= 8 {
+                heightsByWidth.removeAll()
+            }
+            heightsByWidth[width] = height
+            return height
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
     func makeNSView(context: Context) -> NSTextView {
-        let textView = NSTextView()
+        // TextKit 2 re-lays out its viewport whenever the timeline scrolls.
+        let textView = NSTextView(usingTextLayoutManager: false)
         textView.drawsBackground = false
         textView.isEditable = false
         textView.isSelectable = true
@@ -293,23 +342,14 @@ private struct SelectableLinkedText: NSViewRepresentable {
         nsView textView: NSTextView,
         context: Context
     ) -> CGSize? {
-        guard let textContainer = textView.textContainer,
-              let layoutManager = textView.layoutManager,
-              let proposedWidth = proposal.width,
+        guard let proposedWidth = proposal.width,
               proposedWidth.isFinite,
               proposedWidth > 0 else {
             return nil
         }
-        textView.frame.size.width = proposedWidth
-        textContainer.containerSize = NSSize(
-            width: proposedWidth,
-            height: .greatestFiniteMagnitude
-        )
-        layoutManager.ensureLayout(for: textContainer)
-        let usedSize = layoutManager.usedRect(for: textContainer).size
         return CGSize(
             width: proposedWidth,
-            height: max(ceil(usedSize.height), NSFont.preferredFont(forTextStyle: .body).pointSize)
+            height: context.coordinator.height(of: attributedText, width: proposedWidth)
         )
     }
 }
@@ -534,7 +574,6 @@ struct NoteRow: View {
     let editReminder: () -> Void
     let moveToTrash: () -> Void
     let openThread: () -> Void
-    @State private var isHovered = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -633,16 +672,72 @@ struct NoteRow: View {
                             ? Color.blue.opacity(0.14)
                             : Color.clear
                     )
-                if isHovered {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color(nsColor: .labelColor).opacity(0.04))
-                }
+                RowHoverHighlight()
             }
         }
         .contentShape(RoundedRectangle(cornerRadius: 10))
-        .onHover { isHovered = $0 }
         .accessibilityElement(children: .contain)
     }
+}
+
+/// Draws the note hover highlight in AppKit. Hover state in SwiftUI made the whole
+/// timeline re-measure every time the pointer crossed a note while scrolling.
+private struct RowHoverHighlight: NSViewRepresentable {
+    final class HighlightView: NSView {
+        private var isHighlighted = false {
+            didSet {
+                if isHighlighted != oldValue {
+                    needsDisplay = true
+                }
+            }
+        }
+
+        override var wantsUpdateLayer: Bool { true }
+
+        override func updateLayer() {
+            layer?.cornerRadius = 10
+            layer?.backgroundColor = isHighlighted
+                ? NSColor.labelColor.withAlphaComponent(0.04).cgColor
+                : nil
+        }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(
+                NSTrackingArea(
+                    rect: .zero,
+                    options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                    owner: self
+                )
+            )
+            // A replaced tracking area never sends the exit for the old one, which
+            // happens as notes scroll past a still pointer.
+            if let window {
+                isHighlighted = NSApp.isActive && visibleRect.contains(
+                    convert(window.mouseLocationOutsideOfEventStream, from: nil)
+                )
+            }
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            isHighlighted = true
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            isHighlighted = false
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+    }
+
+    func makeNSView(context: Context) -> HighlightView {
+        HighlightView()
+    }
+
+    func updateNSView(_ nsView: HighlightView, context: Context) {}
 }
 
 struct StatusBanner: View {
